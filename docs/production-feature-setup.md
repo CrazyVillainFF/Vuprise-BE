@@ -26,4 +26,4 @@ The web client is deployed on Vercel, while the API is an Express service descri
 
 ## Group and upload storage
 
-Group and post records use the existing MongoDB connection. Configure the existing Cloudinary credentials for persistent production media storage; otherwise media is stored in the API's local `uploads` directory and may not survive an ephemeral-host restart.
+Group profiles and group messages use the existing MongoDB connection. Group messages are scoped to group membership on every read and write, and are indexed by group and creation time for pagination. The connection model uses a canonical pair-key unique index to prevent duplicate requests in opposing directions. Mongoose builds these declared indexes when automatic index creation is enabled; for managed production databases where `autoIndex` is disabled, deploy and run `Connection.createIndexes()` and `GroupMessage.createIndexes()` once using the API's normal MongoDB credentials. Configure the existing Cloudinary credentials for persistent production media storage; otherwise images are stored in the API's local `uploads` directory and may not survive an ephemeral-host restart.

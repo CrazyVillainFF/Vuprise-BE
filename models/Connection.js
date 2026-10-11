@@ -13,6 +13,7 @@ const ConnectionSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  pairKey: { type: String, select: false },
   status: {
     type: String,
     enum: ['pending', 'accepted', 'rejected'],
@@ -23,7 +24,15 @@ const ConnectionSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Ensure a single connection record between two specific users
+ConnectionSchema.pre('validate', function addPairKey(next) {
+  if (this.requester && this.recipient) {
+    this.pairKey = [String(this.requester), String(this.recipient)].sort().join(':');
+  }
+  next();
+});
+
+// Canonical key prevents simultaneous requests in opposite directions.
 ConnectionSchema.index({ requester: 1, recipient: 1 }, { unique: true });
+ConnectionSchema.index({ pairKey: 1 }, { unique: true, partialFilterExpression: { pairKey: { $type: 'string' } } });
 
 module.exports = mongoose.model('Connection', ConnectionSchema);

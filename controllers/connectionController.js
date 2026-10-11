@@ -1,6 +1,9 @@
+const mongoose = require('mongoose');
 const Connection = require('../models/Connection');
 const User = require('../models/User');
 const Notification = require('../models/Notification');
+
+const connectionPairKey = (firstId, secondId) => [String(firstId), String(secondId)].sort().join(':');
 
 // @desc    Send connection request to a user
 // @route   POST /api/connections/:userId
@@ -9,6 +12,10 @@ const sendConnectionRequest = async (req, res, next) => {
   try {
     const recipientId = req.params.userId;
     const requesterId = req.user._id;
+
+    if (!mongoose.isValidObjectId(recipientId)) {
+      return res.status(400).json({ success: false, message: 'Choose a valid user.' });
+    }
 
     if (recipientId.toString() === requesterId.toString()) {
       return res.status(400).json({
@@ -50,21 +57,34 @@ const sendConnectionRequest = async (req, res, next) => {
       }
     }
 
-    const connection = await Connection.create({
-      requester: requesterId,
-      recipient: recipientId,
-      status: 'pending'
-    });
+    let connection;
+    if (existing?.status === 'rejected') {
+      connection = await Connection.findOneAndUpdate(
+        { _id: existing._id, status: 'rejected' },
+        { $set: { requester: requesterId, recipient: recipientId, pairKey: connectionPairKey(requesterId, recipientId), status: 'pending' } },
+        { new: true, runValidators: true }
+      );
+      if (!connection) return res.status(409).json({ success: false, message: 'The connection request changed. Refresh and try again.' });
+    } else {
+      try {
+        connection = await Connection.create({ requester: requesterId, recipient: recipientId, status: 'pending' });
+      } catch (error) {
+        if (error.code === 11000) return res.status(409).json({ success: false, message: 'A connection request already exists.' });
+        throw error;
+      }
+    }
 
     // Create Notification
     await Notification.findOneAndUpdate(
       { recipient: recipientId, connection: connection._id, type: 'connection_request' },
-      { $setOnInsert: {
+      { $set: {
         recipient: recipientId,
         sender: requesterId,
         connection: connection._id,
         type: 'connection_request',
-        message: `${req.user.name} sent you a connection request.`
+        message: `${req.user.name} sent you a connection request.`,
+        read: false,
+        createdAt: new Date()
       } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
@@ -88,19 +108,19 @@ const acceptConnectionRequest = async (req, res, next) => {
     const currentUserId = req.user._id;
 
     // Find request where current user is the recipient (or by ID)
-    let connection = await Connection.findOne({
+    let connection = await Connection.findOneAndUpdate({
       _id: requestId,
       recipient: currentUserId,
       status: 'pending'
-    });
+    }, { $set: { status: 'accepted' } }, { new: true });
 
     // Also support finding by requester ID if someone passes sender's user ID
     if (!connection) {
-      connection = await Connection.findOne({
+      connection = await Connection.findOneAndUpdate({
         requester: requestId,
         recipient: currentUserId,
         status: 'pending'
-      });
+      }, { $set: { status: 'accepted' } }, { new: true });
     }
 
     if (!connection) {
@@ -110,9 +130,6 @@ const acceptConnectionRequest = async (req, res, next) => {
       });
     }
 
-    connection.status = 'accepted';
-    await connection.save();
-
     // Update both users' connections array
     await User.findByIdAndUpdate(connection.requester, {
       $addToSet: { connections: connection.recipient, followers: connection.recipient, following: connection.recipient }
@@ -121,6 +138,8 @@ const acceptConnectionRequest = async (req, res, next) => {
     await User.findByIdAndUpdate(connection.recipient, {
       $addToSet: { connections: connection.requester, followers: connection.requester, following: connection.requester }
     });
+
+    await Notification.updateMany({ recipient: currentUserId, connection: connection._id, type: 'connection_request' }, { $set: { read: true } });
 
     // Notify requester that their connection request was accepted
     await Notification.findOneAndUpdate(
@@ -180,7 +199,7 @@ const rejectOrRemoveConnection = async (req, res, next) => {
       });
     }
 
-    // If it was accepted, pull from both users' connection lists
+    // Accepted connections are removed; a pending request is retained as rejected so it can be cleanly re-sent.
     if (connection.status === 'accepted') {
       await User.findByIdAndUpdate(connection.requester, {
         $pull: { connections: connection.recipient }
@@ -188,9 +207,18 @@ const rejectOrRemoveConnection = async (req, res, next) => {
       await User.findByIdAndUpdate(connection.recipient, {
         $pull: { connections: connection.requester }
       });
+      await Connection.findByIdAndDelete(connection._id);
+    } else if (connection.status === 'pending') {
+      const rejected = await Connection.findOneAndUpdate(
+        { _id: connection._id, status: 'pending' },
+        { $set: { status: 'rejected' } },
+        { new: true }
+      );
+      if (!rejected) return res.status(409).json({ success: false, message: 'This connection request has already been updated.' });
+      await Notification.updateMany({ connection: connection._id, recipient: connection.recipient, type: 'connection_request' }, { $set: { read: true } });
+    } else {
+      return res.status(409).json({ success: false, message: 'This connection request is no longer pending.' });
     }
-
-    await Connection.findByIdAndDelete(connection._id);
 
     res.status(200).json({
       success: true,

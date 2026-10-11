@@ -1,4 +1,5 @@
 const User = require('../models/User');
+const mongoose = require('mongoose');
 const Connection = require('../models/Connection');
 const Post = require('../models/Post');
 const { processUploadedFile } = require('../middleware/uploadMiddleware');
@@ -171,7 +172,9 @@ const getUserById = async (req, res, next) => {
     if (req.user) {
       if (req.user._id.toString() === user._id.toString()) {
         userObj.connectionStatus = 'self';
+        userObj.isBlockedByViewer = false;
       } else {
+        userObj.isBlockedByViewer = Boolean(await User.exists({ _id: req.user._id, blockedUsers: user._id }));
         const connection = await Connection.findOne({
           $or: [
             { requester: req.user._id, recipient: user._id },
@@ -452,6 +455,47 @@ const updateSettings = async (req, res, next) => {
   }
 };
 
+const blockUser = async (req, res, next) => {
+  try {
+    const targetId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(targetId)) {
+      return res.status(400).json({ success: false, message: 'Choose a valid account to block.' });
+    }
+    if (String(req.user._id) === String(targetId)) {
+      return res.status(400).json({ success: false, message: 'You cannot block your own account.' });
+    }
+    if (!(await User.exists({ _id: targetId }))) {
+      return res.status(404).json({ success: false, message: 'Account not found.' });
+    }
+    await User.updateOne({ _id: req.user._id }, { $addToSet: { blockedUsers: targetId } });
+    return res.status(200).json({ success: true, blockedUserId: targetId });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const unblockUser = async (req, res, next) => {
+  try {
+    const targetId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(targetId)) {
+      return res.status(400).json({ success: false, message: 'Choose a valid account to unblock.' });
+    }
+    await User.updateOne({ _id: req.user._id }, { $pull: { blockedUsers: targetId } });
+    return res.status(200).json({ success: true, unblockedUserId: targetId });
+  } catch (error) {
+    return next(error);
+  }
+};
+
+const getBlockedUsers = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select('+blockedUsers').populate('blockedUsers', 'name headline profilePicture').lean();
+    return res.status(200).json({ success: true, users: user?.blockedUsers || [] });
+  } catch (error) {
+    return next(error);
+  }
+};
+
 module.exports = {
   getUsers,
   getSuggestedUsers,
@@ -460,5 +504,8 @@ module.exports = {
   uploadAvatar,
   uploadCover,
   searchUsers,
-  updateSettings
+  updateSettings,
+  blockUser,
+  unblockUser,
+  getBlockedUsers
 };

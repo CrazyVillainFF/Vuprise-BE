@@ -4,7 +4,7 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const fs = require('fs/promises');
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
-const { canViewUserPosts, postVisibilityFilter, addPostVisibility } = require('../utils/postVisibility');
+const { canViewUserPosts, isBlockedBy, postVisibilityFilter, addPostVisibility } = require('../utils/postVisibility');
 
 const savePostMedia = async (file, req, body = {}) => {
   if (!file) return null;
@@ -149,6 +149,7 @@ const getUserPosts = async (req, res, next) => {
 
     const profileOwner = await User.findById(req.params.userId).select('privateAccount _id');
     if (!profileOwner) return res.status(404).json({ success: false, message: 'Profile not found.' });
+    if (await isBlockedBy(req.user?._id, profileOwner._id)) return res.status(404).json({ success: false, message: 'Posts not found.' });
     if (!(await canViewUserPosts(req.user?._id, profileOwner))) {
       return res.status(403).json({ success: false, privateAccount: true, message: 'This account is private.' });
     }
@@ -214,6 +215,7 @@ const getPostById = async (req, res, next) => {
     }
 
     const owner = await User.findById(post.author).select('privateAccount _id');
+    if (await isBlockedBy(req.user?._id, owner?._id)) return res.status(404).json({ success: false, message: 'Post not found.' });
     if (!(await canViewUserPosts(req.user?._id, owner))) {
       return res.status(403).json({ success: false, privateAccount: true, message: 'This account is private.' });
     }
