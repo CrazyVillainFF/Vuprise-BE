@@ -411,9 +411,9 @@ const searchUsers = async (req, res, next) => {
 // @access  Private
 const updateSettings = async (req, res, next) => {
   try {
-    const { themePreference, privateAccount } = req.body;
+    const { themePreference, privateAccount, hideActivity } = req.body;
 
-    const user = await User.findById(req.user._id);
+    const user = await User.findById(req.user._id).select('+hideActivity');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
@@ -427,8 +427,15 @@ const updateSettings = async (req, res, next) => {
       }
       user.privateAccount = privateAccount;
     }
+    if (hideActivity !== undefined) {
+      if (typeof hideActivity !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'Hide Activity must be enabled or disabled.' });
+      }
+      user.hideActivity = hideActivity;
+    }
 
     await user.save();
+    if (hideActivity !== undefined) require('../realtime/presenceHub').setHidden(user._id, hideActivity);
 
     res.status(200).json({
       success: true,
@@ -436,7 +443,8 @@ const updateSettings = async (req, res, next) => {
       user: {
         _id: user._id,
         themePreference: user.themePreference,
-        privateAccount: user.privateAccount
+        privateAccount: user.privateAccount,
+        hideActivity: user.hideActivity
       }
     });
   } catch (error) {

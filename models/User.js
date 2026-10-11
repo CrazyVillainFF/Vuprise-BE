@@ -126,6 +126,11 @@ const UserSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  hideActivity: {
+    type: Boolean,
+    default: false,
+    select: false
+  },
   encryptionPublicKey: {
     type: String,
     default: '',

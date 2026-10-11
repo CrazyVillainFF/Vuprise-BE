@@ -17,6 +17,7 @@ const connectionRoutes = require('./routes/connectionRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const messageRoutes = require('./routes/messageRoutes');
 const groupRoutes = require('./routes/groupRoutes');
+const realtimeRoutes = require('./routes/realtimeRoutes');
 const { cleanupAbandonedVideoUploads } = require('./controllers/videoUploadController');
 
 const app = express();
@@ -249,6 +250,7 @@ app.use('/api/connections', connectionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/messages', messageRoutes);
 app.use('/api/groups', groupRoutes);
+app.use('/api/realtime', realtimeRoutes);
 
 // Error Handling Middlewares
 app.use(notFound);

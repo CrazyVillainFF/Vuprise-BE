@@ -30,12 +30,29 @@ test.afterEach(() => {
   Connection.exists = originals.connectionExists;
 });
 
-test('group creation requires at least two distinct accepted connections', async () => {
+test('group creation allows the owner to create a group without invitees', async () => {
+  const owner = '507f1f77bcf86cd799439011';
+  let groupInput;
+  let notificationCalls = 0;
+  const group = { _id: '507f1f77bcf86cd799439014' };
+  User.find = () => ({ select: async () => [] });
+  Group.create = async (input) => { groupInput = input; return group; };
+  Notification.insertMany = async () => { notificationCalls += 1; };
+  const res = response();
+  await createGroup({ body: { name: 'Solo group', about: '', memberIds: [] }, user: { _id: owner, name: 'Vishnu' } }, res, (error) => { throw error; });
+
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(groupInput.members, [{ user: owner, role: 'owner' }]);
+  assert.deepEqual(groupInput.invitations, []);
+  assert.equal(notificationCalls, 0);
+});
+
+test('group creation rejects duplicate invitees', async () => {
   let created = false;
   Group.create = async () => { created = true; };
   const res = response();
   await createGroup({
-    body: { name: 'Design circle', about: '', memberIds: ['507f1f77bcf86cd799439012'] },
+    body: { name: 'Design circle', about: '', memberIds: ['507f1f77bcf86cd799439012', '507f1f77bcf86cd799439012'] },
     user: { _id: '507f1f77bcf86cd799439011' },
   }, res, (error) => { throw error; });
 

@@ -38,9 +38,8 @@ exports.createGroup = async (req, res, next) => {
     const about = String(req.body.about || '').trim();
     if (name.length < 2 || name.length > 80 || about.length > 1000) return fail(res, 400, 'Group name must be 2–80 characters and About must be at most 1000 characters.');
     const memberIds = Array.isArray(req.body.memberIds) ? req.body.memberIds.map((id) => String(id)) : [];
-    if (memberIds.length < 2) return fail(res, 400, 'Choose at least two connected people to invite.');
     if (new Set(memberIds).size !== memberIds.length || memberIds.some((id) => !mongoose.isValidObjectId(id) || id === req.user._id.toString())) {
-      return fail(res, 400, 'Choose two different connected people.');
+      return fail(res, 400, 'Choose different connected people to invite.');
     }
     const inviteeUsers = await User.find({ _id: { $in: memberIds } }).select('_id');
     if (inviteeUsers.length !== memberIds.length) return fail(res, 400, 'One or more selected people are no longer available.');
@@ -56,7 +55,7 @@ exports.createGroup = async (req, res, next) => {
       members: [{ user: req.user._id, role: 'owner' }],
       invitations: memberIds.map((user) => ({ user, invitedBy: req.user._id, status: 'pending' })),
     });
-    await Notification.insertMany(memberIds.map((recipient) => ({
+    if (memberIds.length) await Notification.insertMany(memberIds.map((recipient) => ({
       recipient,
       sender: req.user._id,
       type: 'group_invitation',
