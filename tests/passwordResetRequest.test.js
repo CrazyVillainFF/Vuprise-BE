@@ -32,7 +32,7 @@ const runRequest = async (knownUser, options = {}) => {
   }
 };
 
-test('recovery sends through Brevo HTTP API using configured sender and deployed Vercel reset origin', async () => {
+test('recovery sends a six-digit OTP through Brevo and stores only its peppered digest', async () => {
   const result = await runRequest({ _id: '507f1f77bcf86cd799439011', email: 'permitted-test-recipient@example.test' });
   assert.equal(result.response.statusCode, 200);
   assert.match(result.response.body.message, /If an account matches/);
@@ -41,31 +41,29 @@ test('recovery sends through Brevo HTTP API using configured sender and deployed
   assert.equal(result.requestOptions.headers['api-key'], 'test-brevo-key');
   assert.equal(result.emailPayload.sender.email, 'vupriseofficial@gmail.com');
   assert.deepEqual(result.emailPayload.to, [{ email: 'permitted-test-recipient@example.test' }]);
-  const link = new URL(result.emailPayload.textContent.match(/https:\/\/[^\s]+/)[0]);
-  assert.equal(link.origin, 'https://nexora-lac-three.vercel.app');
-  assert.equal(link.pathname, '/forgot-password');
-  assert.equal(link.searchParams.get('token').length, 43);
-  assert.match(result.storedUpdate.$set.resetTokenHash, /^[a-f0-9]{64}$/);
-  assert.notEqual(result.storedUpdate.$set.resetTokenHash, link.searchParams.get('token'));
-  assert.equal(JSON.stringify(result.response.body).includes(link.searchParams.get('token')), false);
+  const code = result.emailPayload.textContent.match(/code is (\d{6})/)[1];
+  assert.match(result.storedUpdate.$set.codeHash, /^[a-f0-9]{64}$/);
+  assert.notEqual(result.storedUpdate.$set.codeHash, code);
+  assert.ok(result.storedUpdate.$set.codeExpiresAt.getTime() > Date.now());
+  assert.equal(result.storedUpdate.$set.verificationAttempts, 0);
+  assert.equal(result.storedUpdate.$set.resetTokenHash, '');
+  assert.equal(JSON.stringify(result.response.body).includes(code), false);
 });
 
-test('sender is configurable and missing CLIENT_URL falls back to the deployed Vercel origin', async () => {
-  const result = await runRequest({ _id: '507f1f77bcf86cd799439011', email: 'permitted-test-recipient@example.test' }, { from: 'help@example.com', clientUrl: '' });
+test('sender is configurable', async () => {
+  const result = await runRequest({ _id: '507f1f77bcf86cd799439011', email: 'permitted-test-recipient@example.test' }, { from: 'help@example.com' });
   assert.equal(result.emailPayload.sender.email, 'help@example.com');
-  const link = new URL(result.emailPayload.textContent.match(/https:\/\/[^\s]+/)[0]);
-  assert.equal(link.origin, 'https://nexora-lac-three.vercel.app');
 });
 
-test('Brevo recipient rejection is reported, reset token is invalidated, and no success response is returned', async () => {
+test('Brevo recipient rejection is reported, OTP is invalidated, and no success response is returned', async () => {
   const result = await runRequest({ _id: '507f1f77bcf86cd799439011', email: 'restricted-recipient@example.test' }, {
     providerError: { code: 'invalid_parameter', message: 'recipient email is not authorized' }
   });
   assert.equal(result.response.statusCode, 502);
   assert.equal(result.response.body.code, 'recipient_not_permitted');
   assert.match(result.response.body.message, /Brevo rejected the recipient/);
-  assert.match(JSON.stringify(result.clearedState), /resetTokenHash/);
-  assert.equal(JSON.stringify(result.response.body).includes(result.storedUpdate.$set.resetTokenHash), false);
+  assert.match(JSON.stringify(result.clearedState), /codeHash/);
+  assert.equal(JSON.stringify(result.response.body).includes(result.storedUpdate.$set.codeHash), false);
 });
 
 test('Brevo sender rejection reports no delivery and exposes no provider details', async () => {
@@ -83,14 +81,7 @@ test('Brevo network failures invalidate the token and never return a fake succes
   assert.equal(result.response.statusCode, 502);
   assert.equal(result.response.body.success, false);
   assert.equal(result.response.body.code, 'provider_rejected');
-  assert.match(JSON.stringify(result.clearedState), /resetTokenHash/);
-});
-
-test('invalid password-reset website origins fail before querying or emailing accounts', async () => {
-  const result = await runRequest({ _id: '507f1f77bcf86cd799439011', email: 'person@example.test' }, { clientUrl: 'javascript:alert(1)' });
-  assert.equal(result.response.statusCode, 503);
-  assert.equal(result.emailPayload, undefined);
-  assert.equal(result.storedUpdate, undefined);
+  assert.match(JSON.stringify(result.clearedState), /codeHash/);
 });
 
 test('the legacy verification endpoint that returned a reset token is not exposed', () => {
@@ -106,4 +97,6 @@ test('unknown addresses receive the same generic confirmation and no email is se
   assert.match(result.response.body.message, /If an account matches/);
   assert.equal(result.emailPayload, undefined);
   assert.equal(result.storedUpdate, undefined);
+  const knownResult = await runRequest({ _id: '507f1f77bcf86cd799439011', email: 'permitted-test-recipient@example.test' });
+  assert.deepEqual(result.response.body, knownResult.response.body);
 });
