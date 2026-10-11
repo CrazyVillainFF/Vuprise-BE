@@ -2,22 +2,12 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const os = require('os');
-const cloudinary = require('cloudinary').v2;
+const cloudinary = require('../config/cloudinary');
 
 // Ensure local uploads directory exists
 const uploadDir = path.join(__dirname, '../uploads');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
-}
-
-// Setup Cloudinary if credentials provided
-if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET
-  });
 }
 
 // Multer disk storage configuration
@@ -73,29 +63,25 @@ const upload = multer({
 });
 
 const postUpload = multer({
-  storage: multer.diskStorage({
-    destination: (req, file, cb) => cb(null, os.tmpdir()),
-    filename: (req, file, cb) => cb(null, `${file.fieldname}-${Date.now()}-${crypto.randomBytes(12).toString('hex')}${path.extname(file.originalname).toLowerCase()}`)
-  }),
-  limits: { fileSize: 250 * 1024 * 1024, files: 1 },
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
   fileFilter: (req, file, cb) => {
     const imageTypes = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp', 'image/gif'];
-    const videoTypes = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska'];
     if (file.fieldname === 'image' && imageTypes.includes(file.mimetype)) return cb(null, true);
-    if (file.fieldname === 'video' && videoTypes.includes(file.mimetype)) return cb(null, true);
-    return cb(new Error('Choose a supported image or video file.'));
+    const error = new Error('Video bytes must be uploaded directly to cloud storage. Choose a supported image file here.');
+    error.statusCode = 415;
+    return cb(error);
   }
 });
 
 const preparePostUpload = (req, res, next) => {
   const images = req.files?.image || [];
-  const videos = req.files?.video || [];
-  if (images.length + videos.length > 1) {
-    [...images, ...videos].forEach((file) => fs.unlink(file.path, () => {}));
-    return res.status(400).json({ success: false, message: 'Upload one image or one video per post.' });
+  if (images.length > 1) {
+    images.forEach((file) => fs.unlink(file.path, () => {}));
+    return res.status(400).json({ success: false, message: 'Upload one image per post.' });
   }
-  req.file = images[0] || videos[0] || null;
-  if (req.file?.fieldname === 'image' && req.file.size > 10 * 1024 * 1024) {
+  req.file = req.file || images[0] || null;
+  if (req.file?.size > 10 * 1024 * 1024) {
     fs.unlink(req.file.path, () => {});
     return res.status(400).json({ success: false, message: 'Image size exceeds 10MB.' });
   }
@@ -104,7 +90,7 @@ const preparePostUpload = (req, res, next) => {
 
 /**
  * Upload helper that processes the uploaded file:
- * Uploads to Cloudinary if configured; otherwise returns the static local URL.
+ * Uploads an image to Cloudinary if configured; otherwise returns the static local URL.
  */
 const processUploadedFile = async (file, req, folder = 'nexora') => {
   if (!file) return null;
@@ -135,12 +121,16 @@ const processUploadedFile = async (file, req, folder = 'nexora') => {
 const processUploadedMedia = async (file, req, folder = 'nexora') => {
   if (!file) return null;
   const isVideo = file.mimetype?.startsWith('video/');
-  const resourceType = isVideo ? 'video' : 'image';
+  if (isVideo) {
+    await fs.promises.unlink(file.path).catch(() => {});
+    const error = new Error('Videos must use the secure direct-upload flow.');
+    error.statusCode = 415;
+    throw error;
+  }
   if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
     const result = await cloudinary.uploader.upload(file.path, {
       folder: `nexora/${folder}`,
-      resource_type: resourceType,
-      ...(isVideo ? { eager: [{ format: 'jpg', transformation: [{ width: 640, crop: 'limit' }] }] } : {})
+      resource_type: 'image'
     });
     fs.unlink(file.path, () => {});
     return { url: result.secure_url, publicId: result.public_id, thumbnail: result.eager?.[0]?.secure_url || '' };

@@ -3,7 +3,7 @@ services:
     name: nexora-api
     env: node
     rootDir: server
-    buildCommand: apt-get update && apt-get install -y ffmpeg && npm install
+    buildCommand: npm install
     startCommand: npm start
     envVars:
       - key: NODE_ENV

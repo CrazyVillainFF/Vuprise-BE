@@ -9,9 +9,15 @@ The web client is deployed on Vercel, while the API is an Express service descri
 - Set `CLIENT_URL` to `https://nexora-lac-three.vercel.app` (the blueprint default) or the actual client origin.
 - The sender is `onboarding@resend.dev`. Resend restricts this sender to permitted test recipients until a sending domain is verified; this project does not claim unrestricted delivery.
 
-## Video processing
+## Direct video uploads
 
-The API requires `ffmpeg` and `ffprobe` in `PATH`. The Render build command installs FFmpeg. For another host, install FFmpeg or set `FFMPEG_PATH` and `FFPROBE_PATH`. Videos are probed and transcoded on the API; the server rejects any requested clip longer than 35 seconds.
+- Configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` on the Render API service. The API key and cloud name are returned to an authenticated browser as provider identifiers; the API secret is only used on the server to sign a per-upload authorization.
+- The browser uploads video bytes directly to Cloudinary. The API receives only a small signing request and a small publish request; video bytes are never posted to Render. The existing image and text post routes remain available.
+- The application accepts MP4, WebM, or MOV sources up to 250 MB and validates the stored Cloudinary resource format, byte count, owner/session context, and actual source duration before publishing. The selected trim range must be at most 35 seconds; the published Cloudinary delivery URL applies that range server-side, so client duration values are not trusted for the saved media.
+- In Cloudinary Console, keep the account's maximum upload size at or below 250 MB (or the lower limit of your plan) and monitor storage/transformation quotas. Cloudinary account/plan limits are the provider-side protection during transfer; the application also rejects and deletes oversized uploaded resources when finalizing.
+- Deploy the MongoDB `VideoUploadSession` collection and the unique sparse `Post.videoUploadSession` index. Mongoose creates declared indexes when automatic index creation is enabled; where it is disabled, run `VideoUploadSession.createIndexes()` and `Post.createIndexes()` once using the API's normal MongoDB credentials.
+- Abandoned assets are removed by a periodic cleanup task after 24 hours. Verify that the Render service remains running long enough for the cleanup schedule, or schedule the same exported cleanup function as a Render cron job for stricter cleanup guarantees.
+- FFmpeg is no longer needed by the video publish path; it is not required by the API deployment.
 
 ## Group and upload storage
 

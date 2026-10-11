@@ -17,6 +17,7 @@ const connectionRoutes = require('./routes/connectionRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const messageRoutes = require('./routes/messageRoutes');
 const groupRoutes = require('./routes/groupRoutes');
+const { cleanupAbandonedVideoUploads } = require('./controllers/videoUploadController');
 
 const app = express();
 
@@ -185,6 +186,11 @@ const initApp = async () => {
 };
 
 initApp();
+const videoCleanupTimer = setInterval(() => {
+  cleanupAbandonedVideoUploads().catch(() => {});
+}, 60 * 60 * 1000);
+videoCleanupTimer.unref();
+setTimeout(() => cleanupAbandonedVideoUploads().catch(() => {}), 30_000).unref();
 
 // CORS Configuration
 app.use(cors({

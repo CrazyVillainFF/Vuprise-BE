@@ -27,6 +27,7 @@ const PostSchema = new mongoose.Schema({
   videoTrimStart: { type: Number, min: 0, default: 0, select: false },
   videoTrimEnd: { type: Number, min: 0, default: null, select: false },
   videoThumbnail: { type: String, default: '' },
+  videoUploadSession: { type: mongoose.Schema.Types.ObjectId, ref: 'VideoUploadSession', select: false },
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -59,5 +60,6 @@ PostSchema.virtual('commentCount').get(function () {
 PostSchema.index({ createdAt: -1 });
 PostSchema.index({ author: 1, createdAt: -1 });
 PostSchema.index({ content: 'text' });
+PostSchema.index({ videoUploadSession: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Post', PostSchema);

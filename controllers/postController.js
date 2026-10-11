@@ -4,34 +4,18 @@ const Notification = require('../models/Notification');
 const User = require('../models/User');
 const fs = require('fs/promises');
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
-const { processVideoClip } = require('../utils/videoProcessing');
 const { canViewUserPosts, postVisibilityFilter, addPostVisibility } = require('../utils/postVisibility');
 
 const savePostMedia = async (file, req, body = {}) => {
   if (!file) return null;
-  if (!file.mimetype?.startsWith('video/')) {
-    const image = await processUploadedMedia(file, req, 'posts');
-    return { mediaType: 'image', image: image.url, imagePublicId: image.publicId, videoUrl: '', videoPublicId: '', videoSourceUrl: '', videoSourcePublicId: '', videoDuration: null, videoThumbnail: '' };
-  }
-
-  let clip;
-  let output;
-  try {
-    clip = await processVideoClip(file.path, body.trimStart, body.trimEnd);
-    output = await processUploadedMedia({ path: clip.path, filename: `edited-${Date.now()}.mp4`, mimetype: 'video/mp4' }, req, 'posts');
-    return {
-      mediaType: 'video', image: '', imagePublicId: '', videoUrl: output.url, videoPublicId: output.publicId,
-      videoSourceUrl: '', videoSourcePublicId: '',
-      videoSourceDuration: clip.sourceDuration, videoDuration: clip.duration,
-      videoTrimStart: clip.start, videoTrimEnd: clip.end, videoThumbnail: output.thumbnail || ''
-    };
-  } catch (error) {
-    if (output) await deleteUploadedMedia({ publicId: output.publicId, url: output.url, resourceType: 'video' }).catch(() => {});
+  if (!file.mimetype?.startsWith('image/')) {
+    await fs.unlink(file.path).catch(() => {});
+    const error = new Error('Videos must use the secure direct-upload flow.');
+    error.statusCode = 415;
     throw error;
-  } finally {
-    if (clip?.path) await fs.unlink(clip.path).catch(() => {});
-    if (file.path) await fs.unlink(file.path).catch(() => {});
   }
+  const image = await processUploadedMedia(file, req, 'posts');
+  return { mediaType: 'image', image: image.url, imagePublicId: image.publicId, videoUrl: '', videoPublicId: '', videoSourceUrl: '', videoSourcePublicId: '', videoDuration: null, videoThumbnail: '' };
 };
 
 const removePostMedia = async (post) => {
