@@ -9,6 +9,7 @@ const getNotifications = async (req, res, next) => {
       .populate('sender', 'name headline profilePicture company jobTitle')
       .populate('post', 'content image')
       .populate('connection', 'status requester recipient')
+      .populate('group', 'name photo about')
       .sort({ createdAt: -1 })
       .limit(30);
 

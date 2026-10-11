@@ -14,7 +14,7 @@ const NotificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['connection_request', 'connection_accepted', 'post_like', 'post_comment'],
+    enum: ['connection_request', 'connection_accepted', 'group_invitation', 'post_like', 'post_comment'],
     required: true
   },
   post: {
@@ -24,6 +24,11 @@ const NotificationSchema = new mongoose.Schema({
   connection: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Connection',
+    default: null
+  },
+  group: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Group',
     default: null
   },
   message: {

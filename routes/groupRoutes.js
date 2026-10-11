@@ -3,10 +3,14 @@ const router = express.Router();
 const { protect } = require('../middleware/authMiddleware');
 const { upload, validateImageContent } = require('../middleware/uploadMiddleware');
 const controller = require('../controllers/groupController');
+const messageController = require('../controllers/groupMessageController');
 
 router.use(protect);
 router.get('/', controller.listGroups);
 router.post('/', upload.single('image'), validateImageContent, controller.createGroup);
+router.get('/:id/messages', messageController.getMessages);
+router.post('/:id/messages', messageController.sendMessage);
+router.delete('/:id', controller.deleteGroup);
 router.post('/:id/invitations/:action(accept|decline)', controller.respondInvitation);
 router.post('/:id/invitations/:userId', controller.inviteMember);
 router.patch('/:id/members/:userId/role', controller.setMemberRole);
