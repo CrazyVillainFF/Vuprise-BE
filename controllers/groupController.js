@@ -25,8 +25,18 @@ exports.listGroups = async (req, res, next) => {
       Group.find({ 'members.user': req.user._id }).populate('members.user', 'name headline profilePicture').populate({ path: 'lastMessage', select: 'text imageUrl deletedForEveryone editedAt createdAt sender', populate: { path: 'sender', select: 'name profilePicture' } }).sort({ lastMessageAt: -1, updatedAt: -1 }),
       Group.find({ invitations: { $elemMatch: { user: req.user._id, status: 'pending' } } }).select('name photo owner invitations')
     ]);
+    const groupsWithUnread = await Promise.all(groups.map(async (group) => {
+      const membership = group.members.find((member) => String(member.user?._id || member.user) === req.user._id.toString());
+      const unreadCount = membership ? await GroupMessage.countDocuments({
+        group: group._id,
+        sender: { $ne: req.user._id },
+        createdAt: { $gt: membership.lastReadAt || membership.joinedAt || new Date(0) },
+        hiddenFor: { $ne: req.user._id }
+      }) : 0;
+      return { ...group.toObject(), unreadCount };
+    }));
     const pending = invitations.map((group) => ({ ...group.toObject(), invitations: group.invitations.filter((i) => String(i.user?._id || i.user) === req.user._id.toString() && i.status === 'pending') }));
-    res.json({ success: true, groups, invitations: pending });
+    res.json({ success: true, groups: groupsWithUnread, invitations: pending });
   } catch (error) { next(error); }
 };
 
@@ -37,7 +47,11 @@ exports.createGroup = async (req, res, next) => {
     const name = String(req.body.name || '').trim();
     const about = String(req.body.about || '').trim();
     if (name.length < 2 || name.length > 80 || about.length > 1000) return fail(res, 400, 'Group name must be 2–80 characters and About must be at most 1000 characters.');
-    const memberIds = Array.isArray(req.body.memberIds) ? req.body.memberIds.map((id) => String(id)) : [];
+    const requestedMemberIds = req.body.memberIds;
+    const memberIds = (Array.isArray(requestedMemberIds)
+      ? requestedMemberIds
+      : requestedMemberIds == null ? [] : [requestedMemberIds]
+    ).map((id) => String(id));
     if (new Set(memberIds).size !== memberIds.length || memberIds.some((id) => !mongoose.isValidObjectId(id) || id === req.user._id.toString())) {
       return fail(res, 400, 'Choose different connected people to invite.');
     }

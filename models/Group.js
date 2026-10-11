@@ -8,7 +8,7 @@ const GroupSchema = new mongoose.Schema({
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   lastMessage: { type: mongoose.Schema.Types.ObjectId, ref: 'GroupMessage', default: null },
   lastMessageAt: { type: Date, default: null, index: true },
-  members: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, role: { type: String, enum: ['owner', 'admin', 'member'], default: 'member' }, joinedAt: { type: Date, default: Date.now } }],
+  members: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, role: { type: String, enum: ['owner', 'admin', 'member'], default: 'member' }, joinedAt: { type: Date, default: Date.now }, lastReadAt: { type: Date, default: Date.now } }],
   invitations: [{ user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }, status: { type: String, enum: ['pending', 'accepted', 'declined', 'cancelled'], default: 'pending' }, createdAt: { type: Date, default: Date.now } }]
 }, { timestamps: true, optimisticConcurrency: true });
 

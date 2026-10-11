@@ -55,6 +55,12 @@ const getMessages = async (req, res, next) => {
       .populate('sender', 'name profilePicture')
       .lean();
     if (descending) messages = messages.reverse();
+    if (!before && !after) {
+      await Group.updateOne(
+        { _id: group._id, 'members.user': req.user._id },
+        { $set: { 'members.$.lastReadAt': new Date() } }
+      );
+    }
     res.set('Cache-Control', 'private, no-store');
     res.json({ success: true, messages, hasMore: before ? messages.length === limit : undefined });
   } catch (error) { next(error); }

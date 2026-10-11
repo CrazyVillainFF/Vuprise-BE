@@ -26,6 +26,28 @@ test('non-members cannot list messages or create persistent messages', async () 
   } finally { restore(); }
 });
 
+test('opening a group history marks that member’s unread messages as read', async () => {
+  const group = { _id: '507f1f77bcf86cd799439011' };
+  const userId = '507f1f77bcf86cd799439012';
+  let readUpdate;
+  Group.findOne = () => ({ select: async () => group });
+  GroupMessage.find = () => ({
+    sort: () => ({
+      limit: () => ({
+        populate: () => ({ lean: async () => [] }),
+      }),
+    }),
+  });
+  Group.updateOne = async (filter, update) => { readUpdate = { filter, update }; };
+  const res = response();
+  try {
+    await getMessages({ params: { id: group._id }, user: { _id: userId }, query: {} }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(readUpdate.filter['members.user'], userId);
+    assert.ok(readUpdate.update.$set['members.$.lastReadAt'] instanceof Date);
+  } finally { restore(); }
+});
+
 test('members can send a bounded message and update the group’s last-message pointer', async () => {
   const group = { _id: '507f1f77bcf86cd799439011' };
   const sender = '507f1f77bcf86cd799439012';
