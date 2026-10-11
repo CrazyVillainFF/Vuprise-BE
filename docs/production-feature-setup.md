@@ -6,8 +6,11 @@ The web client is deployed on Vercel, while the API is an Express service descri
 
 - Set `RESEND_API_KEY` in the Render API service environment. Keep it secret and do not add it to Vercel client variables.
 - Set `PASSWORD_RESET_PEPPER` to a long, random server-only secret. The Render blueprint generates one when it creates the service.
-- Set `CLIENT_URL` to `https://nexora-lac-three.vercel.app` (the blueprint default) or the actual client origin.
-- The sender is `onboarding@resend.dev`. Resend restricts this sender to permitted test recipients until a sending domain is verified; this project does not claim unrestricted delivery.
+- Set `CLIENT_URL` to `https://nexora-lac-three.vercel.app` (the blueprint default). This is the existing Vercel origin; no custom website domain is required.
+- `PASSWORD_RESET_FROM` controls the sender and defaults to `onboarding@resend.dev`. Keep it on the Render backend, never in a `VITE_*` variable. For development/testing, Resend's onboarding sender only works for recipients permitted by the Resend account. A verified sender domain is needed for unrestricted production delivery; no such production delivery is implied here.
+- If Resend rejects a sender or test recipient, the request fails visibly and the temporary token is invalidated; the UI must not show a successful-send state. Check the safe error category in the response and the Resend dashboard's email logs. The backend intentionally logs only a category, not the recipient, reset token, API key, or full provider error.
+- A successful Resend API response means the provider accepted the send request, not that the message reached the recipient's inbox. Verify a permitted test recipient before treating end-to-end delivery as confirmed.
+- On Render, configure `RESEND_API_KEY`, `PASSWORD_RESET_PEPPER`, `CLIENT_URL=https://nexora-lac-three.vercel.app`, and `PASSWORD_RESET_FROM=onboarding@resend.dev`. Redeploy the backend after changing environment values. The client only needs its existing API URL; the Resend key must never be configured in Vercel.
 
 ## Direct video uploads
 

@@ -1,14 +1,14 @@
 const User = require('../models/User');
 const PasswordResetState = require('../models/PasswordResetState');
 const PasswordResetCounter = require('../models/PasswordResetCounter');
-const { createResetToken, isResetToken, hashResetToken, safeHashEquals } = require('../utils/passwordResetSecurity');
+const { createResetToken, isResetToken, hashResetToken } = require('../utils/passwordResetSecurity');
 
-const genericRequestMessage = 'If an account matches that email and email delivery is available, a password reset link will arrive shortly.';
+const genericRequestMessage = 'If an account matches and Resend accepts delivery to this address, a reset link will be sent. Test-mode recipients may need to be permitted in your Resend account.';
+const defaultClientUrl = 'https://nexora-lac-three.vercel.app';
 const WINDOW_MS = 30 * 60 * 1000;
 const COUNTER_TTL_MS = 48 * 60 * 60 * 1000;
 const pepper = () => process.env.PASSWORD_RESET_PEPPER || '';
 const digest = (value) => hashResetToken(value, pepper());
-const matchesDigest = safeHashEquals;
 const ipKey = (ip) => `ip:${digest(ip || 'unknown')}`;
 const userKey = (id) => `user:${digest(id.toString())}`;
 
@@ -38,23 +38,62 @@ const releaseCounter = async (key, windowStartedAt) => {
   );
 };
 
-const hasMailConfiguration = () => Boolean(
-  process.env.RESEND_API_KEY
-);
+const getMailConfiguration = () => {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.PASSWORD_RESET_FROM || 'onboarding@resend.dev';
+  let clientUrl;
 
-const sendResetEmail = async (to, resetUrl) => {
-  if (!process.env.RESEND_API_KEY) throw new Error('RESEND_API_KEY is not configured.');
+  try {
+    clientUrl = new URL(process.env.CLIENT_URL || defaultClientUrl);
+  } catch {
+    return { error: 'The password-reset website URL is invalid.' };
+  }
+
+  const isLocalHttp = clientUrl.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(clientUrl.hostname);
+  if ((clientUrl.protocol !== 'https:' && !isLocalHttp) || clientUrl.username || clientUrl.password || clientUrl.search || clientUrl.hash || (clientUrl.pathname !== '/' && clientUrl.pathname !== '')) {
+    return { error: 'The password-reset website URL must be a secure website origin.' };
+  }
+  if (!apiKey) return { error: 'Resend email delivery is not configured on the server.' };
+  if (!/^(?:[^<>\r\n]+\s<)?[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+(?:>)?$/.test(from)) {
+    return { error: 'The configured password-reset sender address is invalid.' };
+  }
+
+  return { apiKey, from, clientUrl };
+};
+
+const classifyResendError = (providerError) => {
+  const detail = `${providerError?.name || ''} ${providerError?.message || ''} ${providerError?.statusCode || ''}`.toLowerCase();
+  if (/recipient|testing email|test-mode|only send.*own email|not authorized.*email/.test(detail)) {
+    return {
+      category: 'recipient_not_permitted',
+      message: 'Resend rejected this test recipient. With onboarding@resend.dev, the recipient must be permitted by your Resend account. No email was sent.'
+    };
+  }
+  if (/sender|\bfrom\b|domain.*verif|verif.*domain/.test(detail)) {
+    return {
+      category: 'sender_rejected',
+      message: 'Resend rejected the configured sender. Check PASSWORD_RESET_FROM and your Resend sender/domain settings. No email was sent.'
+    };
+  }
+  return {
+    category: 'provider_rejected',
+    message: 'Resend could not accept the password-reset email. No email was sent; check the Resend logs and try again.'
+  };
+};
+
+const sendResetEmail = async (to, resetUrl, mailConfig) => {
   // Keep the provider SDK and secret on the server only.
   const { Resend } = require('resend');
-  const resend = new Resend(process.env.RESEND_API_KEY);
-  const { error } = await resend.emails.send({
-    from: 'onboarding@resend.dev',
+  const resend = new Resend(mailConfig.apiKey);
+  const { data, error } = await resend.emails.send({
+    from: mailConfig.from,
     to: [to],
     subject: 'Reset your Vuprise password',
     text: `Use this link to reset your Vuprise password. It expires in 10 minutes and can only be used once: ${resetUrl.href}\n\nIf you did not request this, ignore this message.`,
     html: `<p>Use the link below to reset your Vuprise password. It expires in 10 minutes and can only be used once.</p><p><a href="${resetUrl.href}">Reset password</a></p><p>If you did not request this, ignore this message.</p>`
   });
-  if (error) throw new Error(`Resend rejected reset email (${error.name || 'provider error'}).`);
+  if (error) throw classifyResendError(error);
+  if (!data?.id) throw classifyResendError({ name: 'missing_message_id' });
 };
 
 const requestPasswordReset = async (req, res, next) => {
@@ -62,7 +101,8 @@ const requestPasswordReset = async (req, res, next) => {
     if (!process.env.JWT_SECRET || !pepper()) {
       return res.status(503).json({ success: false, message: 'Password recovery is temporarily unavailable.' });
     }
-    if (!hasMailConfiguration() || !process.env.CLIENT_URL) return res.status(503).json({ success: false, message: 'Password recovery is temporarily unavailable because server-side email delivery is not configured.' });
+    const mailConfig = getMailConfiguration();
+    if (mailConfig.error) return res.status(503).json({ success: false, message: mailConfig.error });
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const generic = () => res.status(200).json({ success: true, message: genericRequestMessage });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return generic();
@@ -78,7 +118,7 @@ const requestPasswordReset = async (req, res, next) => {
 
     const resetToken = createResetToken();
     const tokenHash = digest(resetToken);
-    const resetUrl = new URL('/forgot-password', process.env.CLIENT_URL);
+    const resetUrl = new URL('/forgot-password', mailConfig.clientUrl);
     resetUrl.searchParams.set('token', resetToken);
     await PasswordResetState.findOneAndUpdate(
       { user: user._id },
@@ -94,52 +134,18 @@ const requestPasswordReset = async (req, res, next) => {
     );
 
     try {
-      await sendResetEmail(user.email, resetUrl);
+      await sendResetEmail(user.email, resetUrl, mailConfig);
     } catch (mailError) {
       await Promise.all([
         PasswordResetState.updateOne({ user: user._id, resetTokenHash: tokenHash }, { $set: { resetTokenHash: '', resetTokenExpiresAt: null } }),
         releaseCounter(userKey(user._id), accountSlot.windowStartedAt)
       ]);
-      console.error('[Password Reset] Email delivery failed:', mailError.message);
-      return generic();
+      const deliveryError = mailError?.category ? mailError : classifyResendError(mailError);
+      console.error('[Password Reset] Email delivery failed:', deliveryError.category);
+      return res.status(502).json({ success: false, code: deliveryError.category, message: deliveryError.message });
     }
 
     return generic();
-  } catch (error) { next(error); }
-};
-
-const verifyPasswordResetCode = async (req, res, next) => {
-  try {
-    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-    const code = typeof req.body.code === 'string' ? req.body.code : '';
-    if (!/^\d{6}$/.test(code) || !email) {
-      return res.status(400).json({ success: false, message: 'The code is invalid or expired.' });
-    }
-    if (!(await reserveCounter(ipKey(req.ip), 40))) {
-      return res.status(429).json({ success: false, message: 'Too many verification attempts. Try again later.' });
-    }
-
-    const user = await User.findOne({ email }).select('_id');
-    if (!user) return res.status(400).json({ success: false, message: 'The code is invalid or expired.' });
-    const now = new Date();
-    const state = await PasswordResetState.findOneAndUpdate(
-      { user: user._id, codeExpiresAt: { $gt: now }, verificationAttempts: { $lt: 5 }, consumedAt: null },
-      { $inc: { verificationAttempts: 1 } },
-      { new: true }
-    );
-    if (!state?.codeHash || !matchesDigest(digest(`${user._id}:${code}`), state.codeHash)) {
-      return res.status(400).json({ success: false, message: 'The code is invalid or expired.' });
-    }
-
-    const resetToken = createResetToken();
-    const tokenHash = digest(resetToken);
-    const consumed = await PasswordResetState.findOneAndUpdate(
-      { user: user._id, codeHash: state.codeHash, codeExpiresAt: { $gt: now }, resetTokenHash: '' },
-      { $set: { codeHash: '', codeExpiresAt: null, resetTokenHash: tokenHash, resetTokenExpiresAt: new Date(now.getTime() + 10 * 60 * 1000) } },
-      { new: true }
-    );
-    if (!consumed) return res.status(400).json({ success: false, message: 'The code is invalid or expired.' });
-    return res.json({ success: true, resetToken, expiresInSeconds: 600 });
   } catch (error) { next(error); }
 };
 
@@ -176,4 +182,4 @@ const completePasswordReset = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { requestPasswordReset, verifyPasswordResetCode, completePasswordReset };
+module.exports = { requestPasswordReset, completePasswordReset };
