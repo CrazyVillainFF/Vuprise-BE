@@ -12,6 +12,14 @@ test('CORS allows configured production origins but not arbitrary Vercel preview
   assert.equal(isAllowedOrigin('https://attacker.vercel.app', { allowedOrigins, environment: 'production' }), false);
 });
 
+test("CORS allows only this Vercel project's personal preview deployments", () => {
+  assert.equal(isAllowedOrigin('https://nexora-2pwxqu19-vishnu-4571.vercel.app', { allowedOrigins: [], environment: 'production' }), true);
+  assert.equal(isAllowedOrigin('https://nexora-git-fix-cors-vishnu-4571.vercel.app', { allowedOrigins: [], environment: 'production' }), true);
+  assert.equal(isAllowedOrigin('https://another-project-2pwxqu19-vishnu-4571.vercel.app', { allowedOrigins: [], environment: 'production' }), false);
+  assert.equal(isAllowedOrigin('https://nexora-2pwxqu19-attacker.vercel.app', { allowedOrigins: [], environment: 'production' }), false);
+  assert.equal(isAllowedOrigin('http://nexora-2pwxqu19-vishnu-4571.vercel.app', { allowedOrigins: [], environment: 'production' }), false);
+});
+
 test('CORS allows local tools during development and non-browser requests', () => {
   assert.equal(isAllowedOrigin('http://localhost:4173', { allowedOrigins: [], environment: 'development' }), true);
   assert.equal(isAllowedOrigin('https://attacker.example', { allowedOrigins: [], environment: 'development' }), false);

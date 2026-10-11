@@ -9,10 +9,25 @@ const getAllowedOrigins = (env = process.env) => [
   ...(env.ALLOWED_CLIENT_ORIGINS || '').split(','),
 ].filter(Boolean).map(normalizeOrigin);
 
+// Vercel's immutable preview deployments receive a unique URL per deploy. Keep
+// preview access limited to this project's deployments under its own account;
+// never allow arbitrary *.vercel.app origins.
+const isNexoraVercelPreview = (origin) => {
+  try {
+    const url = new URL(origin);
+    return url.protocol === 'https:'
+      && url.origin === origin
+      && /^nexora-[a-z0-9-]+-vishnu-4571\.vercel\.app$/i.test(url.hostname);
+  } catch {
+    return false;
+  }
+};
+
 const isAllowedOrigin = (origin, { allowedOrigins = getAllowedOrigins(), environment = process.env.NODE_ENV } = {}) => {
   if (!origin) return true;
   const normalizedOrigin = normalizeOrigin(origin);
   if (allowedOrigins.includes(normalizedOrigin)) return true;
+  if (isNexoraVercelPreview(normalizedOrigin)) return true;
   if (environment === 'development') {
     try {
       const { hostname } = new URL(normalizedOrigin);
