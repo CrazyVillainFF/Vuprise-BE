@@ -16,6 +16,17 @@ const PostSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  imagePublicId: { type: String, default: '' },
+  mediaType: { type: String, enum: ['image', 'video'], default: 'image' },
+  videoUrl: { type: String, default: '' },
+  videoPublicId: { type: String, default: '' },
+  videoSourceUrl: { type: String, default: '', select: false },
+  videoSourcePublicId: { type: String, default: '', select: false },
+  videoDuration: { type: Number, min: 0, max: 35, default: null },
+  videoSourceDuration: { type: Number, min: 0, default: null, select: false },
+  videoTrimStart: { type: Number, min: 0, default: 0, select: false },
+  videoTrimEnd: { type: Number, min: 0, default: null, select: false },
+  videoThumbnail: { type: String, default: '' },
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'

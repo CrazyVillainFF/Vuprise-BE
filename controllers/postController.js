@@ -2,25 +2,62 @@ const Post = require('../models/Post');
 const Comment = require('../models/Comment');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
-const { processUploadedFile } = require('../middleware/uploadMiddleware');
+const fs = require('fs/promises');
+const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
+const { processVideoClip } = require('../utils/videoProcessing');
 const { canViewUserPosts, postVisibilityFilter, addPostVisibility } = require('../utils/postVisibility');
+
+const savePostMedia = async (file, req, body = {}) => {
+  if (!file) return null;
+  if (!file.mimetype?.startsWith('video/')) {
+    const image = await processUploadedMedia(file, req, 'posts');
+    return { mediaType: 'image', image: image.url, imagePublicId: image.publicId, videoUrl: '', videoPublicId: '', videoSourceUrl: '', videoSourcePublicId: '', videoDuration: null, videoThumbnail: '' };
+  }
+
+  let clip;
+  let output;
+  try {
+    clip = await processVideoClip(file.path, body.trimStart, body.trimEnd);
+    output = await processUploadedMedia({ path: clip.path, filename: `edited-${Date.now()}.mp4`, mimetype: 'video/mp4' }, req, 'posts');
+    return {
+      mediaType: 'video', image: '', imagePublicId: '', videoUrl: output.url, videoPublicId: output.publicId,
+      videoSourceUrl: '', videoSourcePublicId: '',
+      videoSourceDuration: clip.sourceDuration, videoDuration: clip.duration,
+      videoTrimStart: clip.start, videoTrimEnd: clip.end, videoThumbnail: output.thumbnail || ''
+    };
+  } catch (error) {
+    if (output) await deleteUploadedMedia({ publicId: output.publicId, url: output.url, resourceType: 'video' }).catch(() => {});
+    throw error;
+  } finally {
+    if (clip?.path) await fs.unlink(clip.path).catch(() => {});
+    if (file.path) await fs.unlink(file.path).catch(() => {});
+  }
+};
+
+const removePostMedia = async (post) => {
+  await Promise.all([
+    deleteUploadedMedia({ publicId: post.imagePublicId, url: post.image, resourceType: 'image' }),
+    deleteUploadedMedia({ publicId: post.videoPublicId, url: post.videoUrl, resourceType: 'video' }),
+    deleteUploadedMedia({ publicId: post.videoSourcePublicId, url: post.videoSourceUrl, resourceType: 'video' })
+  ]);
+};
 
 // @desc    Create a new post
 // @route   POST /api/posts
 // @access  Private
 const createPost = async (req, res, next) => {
+  let media;
+  let created = false;
   try {
-    const { content } = req.body;
-    let imageUrl = '';
+    const rawContent = req.body.content;
+    if (rawContent !== undefined && (typeof rawContent !== 'string' || rawContent.length > 5000)) return res.status(400).json({ success: false, message: 'Post text must be 5000 characters or fewer.' });
+    const content = typeof rawContent === 'string' ? rawContent.trim() : '';
+    media = await savePostMedia(req.file, req, req.body);
 
-    if (req.file) {
-      imageUrl = await processUploadedFile(req.file, req, 'posts');
-    }
-
-    if (!content && !imageUrl) {
+    if (!content && !media) {
       return res.status(400).json({
         success: false,
-        message: 'A post must contain either text content or an image.'
+        message: 'A post must contain text, an image, or a video.'
       });
     }
 
@@ -35,10 +72,11 @@ const createPost = async (req, res, next) => {
 
     const post = await Post.create({
       author: req.user._id,
-      content: content || '',
-      image: imageUrl || '',
+      content,
+      ...(media || {}),
       tags
     });
+    created = true;
 
     const populatedPost = await Post.findById(post._id)
       .populate('author', 'name headline profilePicture company jobTitle location');
@@ -54,6 +92,10 @@ const createPost = async (req, res, next) => {
       post: postObj
     });
   } catch (error) {
+    if (!created) {
+      if (media) await removePostMedia(media).catch(() => {});
+      if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});
+    }
     next(error);
   }
 };
@@ -211,7 +253,7 @@ const getPostById = async (req, res, next) => {
 // @access  Private
 const updatePost = async (req, res, next) => {
   try {
-    let post = await Post.findById(req.params.id);
+    let post = await Post.findById(req.params.id).select('+videoSourceUrl +videoSourcePublicId +videoSourceDuration +videoTrimStart +videoTrimEnd');
 
     if (!post) {
       return res.status(404).json({
@@ -233,23 +275,49 @@ const updatePost = async (req, res, next) => {
       });
     }
 
-    const { content } = req.body;
+    const previousMedia = {
+      image: post.image, imagePublicId: post.imagePublicId,
+      videoUrl: post.videoUrl, videoPublicId: post.videoPublicId,
+      videoSourceUrl: post.videoSourceUrl, videoSourcePublicId: post.videoSourcePublicId
+    };
+
+    const rawContent = req.body.content;
+    if (rawContent !== undefined && (typeof rawContent !== 'string' || rawContent.length > 5000)) return res.status(400).json({ success: false, message: 'Post text must be 5000 characters or fewer.' });
+    const content = typeof rawContent === 'string' ? rawContent.trim() : undefined;
     if (content !== undefined) {
       post.content = content;
       const matches = content.match(/#[a-zA-Z0-9_]+/g);
       post.tags = matches ? matches.map(t => t.substring(1).toLowerCase()) : [];
     }
 
+    const keepsCurrentMedia = req.body.removeMedia !== 'true' && Boolean(post.image || post.videoUrl);
+    if (!String(post.content || '').trim() && !req.file && !keepsCurrentMedia) return res.status(400).json({ success: false, message: 'A post must contain text, an image, or a video.' });
+
+    let nextMedia = null;
     if (req.file) {
-      post.image = await processUploadedFile(req.file, req, 'posts');
+      nextMedia = await savePostMedia(req.file, req, req.body);
+      post.set(nextMedia);
+    } else if (req.body.removeMedia === 'true') {
+      post.set({ mediaType: 'image', image: '', imagePublicId: '', videoUrl: '', videoPublicId: '', videoSourceUrl: '', videoSourcePublicId: '', videoSourceDuration: null, videoDuration: null, videoTrimStart: 0, videoTrimEnd: null, videoThumbnail: '' });
     }
 
-    await post.save();
+    try { await post.save(); }
+    catch (saveError) {
+      if (nextMedia) await removePostMedia({ ...nextMedia }).catch(() => {});
+      throw saveError;
+    }
+
+    if (nextMedia || req.body.removeMedia === 'true') await removePostMedia(previousMedia).catch((cleanupError) => console.error('[Post media cleanup]', cleanupError.message));
 
     const updated = await Post.findById(post._id)
       .populate('author', 'name headline profilePicture company jobTitle location');
 
     const pObj = updated.toObject();
+    delete pObj.videoSourceUrl;
+    delete pObj.videoSourcePublicId;
+    delete pObj.videoSourceDuration;
+    delete pObj.videoTrimStart;
+    delete pObj.videoTrimEnd;
     pObj.isLiked = updated.likes.some(id => id.toString() === req.user._id.toString());
     pObj.likeCount = updated.likes.length;
     pObj.commentCount = updated.comments.length;
@@ -260,6 +328,7 @@ const updatePost = async (req, res, next) => {
       post: pObj
     });
   } catch (error) {
+    if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});
     next(error);
   }
 };
@@ -269,7 +338,7 @@ const updatePost = async (req, res, next) => {
 // @access  Private
 const deletePost = async (req, res, next) => {
   try {
-    const post = await Post.findById(req.params.id);
+    const post = await Post.findById(req.params.id).select('+videoSourceUrl +videoSourcePublicId');
 
     if (!post) {
       return res.status(404).json({
@@ -290,6 +359,7 @@ const deletePost = async (req, res, next) => {
     await Comment.deleteMany({ post: post._id });
     await Notification.deleteMany({ post: post._id });
     await Post.findByIdAndDelete(post._id);
+    await removePostMedia(post).catch((cleanupError) => console.error('[Post media cleanup]', cleanupError.message));
 
     res.status(200).json({
       success: true,

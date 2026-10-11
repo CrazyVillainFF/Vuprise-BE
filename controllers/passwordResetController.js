@@ -1,19 +1,14 @@
-const crypto = require('crypto');
-const nodemailer = require('nodemailer');
 const User = require('../models/User');
 const PasswordResetState = require('../models/PasswordResetState');
 const PasswordResetCounter = require('../models/PasswordResetCounter');
+const { createResetToken, isResetToken, hashResetToken, safeHashEquals } = require('../utils/passwordResetSecurity');
 
-const genericRequestMessage = 'If an account matches that email and email delivery is available, a reset code will arrive shortly.';
+const genericRequestMessage = 'If an account matches that email and email delivery is available, a password reset link will arrive shortly.';
 const WINDOW_MS = 30 * 60 * 1000;
 const COUNTER_TTL_MS = 48 * 60 * 60 * 1000;
 const pepper = () => process.env.PASSWORD_RESET_PEPPER || '';
-const digest = (value) => crypto.createHmac('sha256', pepper()).update(value).digest('hex');
-const matchesDigest = (left, right) => {
-  const leftBytes = Buffer.from(left || '', 'hex');
-  const rightBytes = Buffer.from(right || '', 'hex');
-  return leftBytes.length === rightBytes.length && leftBytes.length > 0 && crypto.timingSafeEqual(leftBytes, rightBytes);
-};
+const digest = (value) => hashResetToken(value, pepper());
+const matchesDigest = safeHashEquals;
 const ipKey = (ip) => `ip:${digest(ip || 'unknown')}`;
 const userKey = (id) => `user:${digest(id.toString())}`;
 
@@ -44,25 +39,30 @@ const releaseCounter = async (key, windowStartedAt) => {
 };
 
 const hasMailConfiguration = () => Boolean(
-  process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.SMTP_FROM
+  process.env.RESEND_API_KEY
 );
 
-const createTransport = () => nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT) || 587,
-  secure: process.env.SMTP_SECURE === 'true',
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-});
+const sendResetEmail = async (to, resetUrl) => {
+  if (!process.env.RESEND_API_KEY) throw new Error('RESEND_API_KEY is not configured.');
+  // Keep the provider SDK and secret on the server only.
+  const { Resend } = require('resend');
+  const resend = new Resend(process.env.RESEND_API_KEY);
+  const { error } = await resend.emails.send({
+    from: 'onboarding@resend.dev',
+    to: [to],
+    subject: 'Reset your Vuprise password',
+    text: `Use this link to reset your Vuprise password. It expires in 10 minutes and can only be used once: ${resetUrl.href}\n\nIf you did not request this, ignore this message.`,
+    html: `<p>Use the link below to reset your Vuprise password. It expires in 10 minutes and can only be used once.</p><p><a href="${resetUrl.href}">Reset password</a></p><p>If you did not request this, ignore this message.</p>`
+  });
+  if (error) throw new Error(`Resend rejected reset email (${error.name || 'provider error'}).`);
+};
 
 const requestPasswordReset = async (req, res, next) => {
   try {
     if (!process.env.JWT_SECRET || !pepper()) {
       return res.status(503).json({ success: false, message: 'Password recovery is temporarily unavailable.' });
     }
-    if (!hasMailConfiguration()) {
-      return res.status(503).json({ success: false, message: 'Password recovery email is not configured on this server yet.' });
-    }
-
+    if (!hasMailConfiguration() || !process.env.CLIENT_URL) return res.status(503).json({ success: false, message: 'Password recovery is temporarily unavailable because server-side email delivery is not configured.' });
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const generic = () => res.status(200).json({ success: true, message: genericRequestMessage });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return generic();
@@ -76,32 +76,28 @@ const requestPasswordReset = async (req, res, next) => {
     const accountSlot = await reserveCounter(userKey(user._id), 5);
     if (!accountSlot) return generic();
 
-    const code = crypto.randomInt(0, 1000000).toString().padStart(6, '0');
-    const codeHash = digest(`${user._id}:${code}`);
+    const resetToken = createResetToken();
+    const tokenHash = digest(resetToken);
+    const resetUrl = new URL('/forgot-password', process.env.CLIENT_URL);
+    resetUrl.searchParams.set('token', resetToken);
     await PasswordResetState.findOneAndUpdate(
       { user: user._id },
       { $set: {
-        codeHash,
-        codeExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+        codeHash: '',
+        codeExpiresAt: null,
         verificationAttempts: 0,
-        resetTokenHash: '',
-        resetTokenExpiresAt: null,
+        resetTokenHash: tokenHash,
+        resetTokenExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
         consumedAt: null
       } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
     try {
-      await createTransport().sendMail({
-        from: process.env.SMTP_FROM,
-        to: user.email,
-        subject: 'Your Vuprise password reset code',
-        text: `Your Vuprise password reset code is ${code}. It expires in 10 minutes. If you did not request this, ignore this message.`,
-        html: `<p>Your Vuprise password reset code is:</p><p style="font-size:28px;font-weight:700;letter-spacing:8px">${code}</p><p>It expires in 10 minutes. If you did not request this, ignore this message.</p>`
-      });
+      await sendResetEmail(user.email, resetUrl);
     } catch (mailError) {
       await Promise.all([
-        PasswordResetState.updateOne({ user: user._id, codeHash }, { $set: { codeHash: '', codeExpiresAt: null } }),
+        PasswordResetState.updateOne({ user: user._id, resetTokenHash: tokenHash }, { $set: { resetTokenHash: '', resetTokenExpiresAt: null } }),
         releaseCounter(userKey(user._id), accountSlot.windowStartedAt)
       ]);
       console.error('[Password Reset] Email delivery failed:', mailError.message);
@@ -135,7 +131,7 @@ const verifyPasswordResetCode = async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'The code is invalid or expired.' });
     }
 
-    const resetToken = crypto.randomBytes(32).toString('base64url');
+    const resetToken = createResetToken();
     const tokenHash = digest(resetToken);
     const consumed = await PasswordResetState.findOneAndUpdate(
       { user: user._id, codeHash: state.codeHash, codeExpiresAt: { $gt: now }, resetTokenHash: '' },
@@ -153,7 +149,7 @@ const completePasswordReset = async (req, res, next) => {
       return res.status(429).json({ success: false, message: 'Too many reset attempts. Try again later.' });
     }
     const { resetToken, newPassword, confirmPassword } = req.body;
-    if (typeof resetToken !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(resetToken)) {
+    if (!isResetToken(resetToken)) {
       return res.status(400).json({ success: false, message: 'The reset authorization is invalid or expired.' });
     }
     if (typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 128) {

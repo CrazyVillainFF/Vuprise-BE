@@ -3,7 +3,7 @@ services:
     name: nexora-api
     env: node
     rootDir: server
-    buildCommand: npm install
+    buildCommand: apt-get update && apt-get install -y ffmpeg && npm install
     startCommand: npm start
     envVars:
       - key: NODE_ENV
@@ -14,9 +14,13 @@ services:
         sync: false
       - key: JWT_SECRET
         generateValue: true
+      - key: PASSWORD_RESET_PEPPER
+        generateValue: true
       - key: JWT_EXPIRE
         value: 30d
       - key: CLIENT_URL
+        value: https://nexora-lac-three.vercel.app
+      - key: RESEND_API_KEY
         sync: false
       - key: CLOUDINARY_CLOUD_NAME
         sync: false

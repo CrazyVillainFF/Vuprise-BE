@@ -16,6 +16,7 @@ const commentRoutes = require('./routes/commentRoutes');
 const connectionRoutes = require('./routes/connectionRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const messageRoutes = require('./routes/messageRoutes');
+const groupRoutes = require('./routes/groupRoutes');
 
 const app = express();
 
@@ -241,6 +242,7 @@ app.use('/api/comments', commentRoutes);
 app.use('/api/connections', connectionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/messages', messageRoutes);
+app.use('/api/groups', groupRoutes);
 
 // Error Handling Middlewares
 app.use(notFound);

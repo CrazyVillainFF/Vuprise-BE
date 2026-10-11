@@ -5,7 +5,7 @@ const notFound = (req, res, next) => {
 };
 
 const errorHandler = (err, req, res, next) => {
-  let statusCode = res.statusCode === 200 ? 500 : res.statusCode;
+  let statusCode = err.statusCode || (res.statusCode === 200 ? 500 : res.statusCode);
   let message = err.message;
 
   // Mongoose bad ObjectId
@@ -26,12 +26,14 @@ const errorHandler = (err, req, res, next) => {
     statusCode = 400;
     message = Object.values(err.errors).map(val => val.message).join(', ');
   }
+  if (err.name === 'VersionError') { statusCode = 409; message = 'This record changed while you were editing it. Refresh and try again.'; }
 
   // Multer errors
   if (err.code === 'LIMIT_FILE_SIZE') {
-    statusCode = 400;
-    message = 'File size is too large. Maximum allowed size is 10MB.';
+    statusCode = 413;
+    message = 'The uploaded file is too large. Images are limited to 10MB and videos to 250MB.';
   }
+  if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') { statusCode = 400; message = 'Upload one image or one video per post.'; }
 
   console.error(`[Error ${statusCode}] ${req.method} ${req.originalUrl}:`, err.message);
 

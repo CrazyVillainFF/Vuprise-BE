@@ -10,13 +10,13 @@ const {
   toggleLikePost
 } = require('../controllers/postController');
 const { protect, optionalAuth } = require('../middleware/authMiddleware');
-const { upload, validateImageContent } = require('../middleware/uploadMiddleware');
+const { upload, postUpload, preparePostUpload, validateImageContent } = require('../middleware/uploadMiddleware');
 
-router.post('/', protect, upload.single('image'), validateImageContent, createPost);
+router.post('/', protect, postUpload.fields([{ name: 'image', maxCount: 1 }, { name: 'video', maxCount: 1 }]), preparePostUpload, validateImageContent, createPost);
 router.get('/feed', optionalAuth, getFeed);
 router.get('/user/:userId', optionalAuth, getUserPosts);
 router.get('/:id', optionalAuth, getPostById);
-router.put('/:id', protect, upload.single('image'), validateImageContent, updatePost);
+router.put('/:id', protect, postUpload.fields([{ name: 'image', maxCount: 1 }, { name: 'video', maxCount: 1 }]), preparePostUpload, validateImageContent, updatePost);
 router.delete('/:id', protect, deletePost);
 router.post('/:id/like', protect, toggleLikePost);
 

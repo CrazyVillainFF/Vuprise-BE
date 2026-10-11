@@ -1,6 +1,8 @@
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const os = require('os');
 const cloudinary = require('cloudinary').v2;
 
 // Ensure local uploads directory exists
@@ -24,7 +26,7 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const uniqueSuffix = `${Date.now()}-${crypto.randomBytes(12).toString('hex')}`;
     const ext = path.extname(file.originalname).toLowerCase();
     cb(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
   }
@@ -42,6 +44,7 @@ const fileFilter = (req, file, cb) => {
 
 const validateImageContent = (req, res, next) => {
   if (!req.file) return next();
+  if (req.file.mimetype?.startsWith('video/')) return next();
   let valid = false;
   try {
     const signature = Buffer.alloc(12);
@@ -69,6 +72,36 @@ const upload = multer({
   fileFilter
 });
 
+const postUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, os.tmpdir()),
+    filename: (req, file, cb) => cb(null, `${file.fieldname}-${Date.now()}-${crypto.randomBytes(12).toString('hex')}${path.extname(file.originalname).toLowerCase()}`)
+  }),
+  limits: { fileSize: 250 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const imageTypes = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp', 'image/gif'];
+    const videoTypes = ['video/mp4', 'video/webm', 'video/quicktime', 'video/x-matroska'];
+    if (file.fieldname === 'image' && imageTypes.includes(file.mimetype)) return cb(null, true);
+    if (file.fieldname === 'video' && videoTypes.includes(file.mimetype)) return cb(null, true);
+    return cb(new Error('Choose a supported image or video file.'));
+  }
+});
+
+const preparePostUpload = (req, res, next) => {
+  const images = req.files?.image || [];
+  const videos = req.files?.video || [];
+  if (images.length + videos.length > 1) {
+    [...images, ...videos].forEach((file) => fs.unlink(file.path, () => {}));
+    return res.status(400).json({ success: false, message: 'Upload one image or one video per post.' });
+  }
+  req.file = images[0] || videos[0] || null;
+  if (req.file?.fieldname === 'image' && req.file.size > 10 * 1024 * 1024) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ success: false, message: 'Image size exceeds 10MB.' });
+  }
+  return next();
+};
+
 /**
  * Upload helper that processes the uploaded file:
  * Uploads to Cloudinary if configured; otherwise returns the static local URL.
@@ -81,7 +114,7 @@ const processUploadedFile = async (file, req, folder = 'nexora') => {
     try {
       const result = await cloudinary.uploader.upload(file.path, {
         folder: `nexora/${folder}`,
-        resource_type: 'image'
+        resource_type: file.mimetype?.startsWith('video/') ? 'video' : 'image'
       });
       // Remove temporary local file after Cloudinary upload
       if (fs.existsSync(file.path)) {
@@ -99,4 +132,39 @@ const processUploadedFile = async (file, req, folder = 'nexora') => {
   return `${baseUrl}/uploads/${file.filename}`;
 };
 
-module.exports = { upload, processUploadedFile, validateImageContent };
+const processUploadedMedia = async (file, req, folder = 'nexora') => {
+  if (!file) return null;
+  const isVideo = file.mimetype?.startsWith('video/');
+  const resourceType = isVideo ? 'video' : 'image';
+  if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
+    const result = await cloudinary.uploader.upload(file.path, {
+      folder: `nexora/${folder}`,
+      resource_type: resourceType,
+      ...(isVideo ? { eager: [{ format: 'jpg', transformation: [{ width: 640, crop: 'limit' }] }] } : {})
+    });
+    fs.unlink(file.path, () => {});
+    return { url: result.secure_url, publicId: result.public_id, thumbnail: result.eager?.[0]?.secure_url || '' };
+  }
+  let filename = file.filename;
+  if (!path.resolve(file.path).startsWith(`${path.resolve(uploadDir)}${path.sep}`)) {
+    filename = `media-${Date.now()}-${crypto.randomBytes(12).toString('hex')}${path.extname(file.path) || (isVideo ? '.mp4' : '.jpg')}`;
+    const storedPath = path.join(uploadDir, filename);
+    await fs.promises.copyFile(file.path, storedPath);
+    await fs.promises.unlink(file.path).catch(() => {});
+  }
+  const baseUrl = `${req.protocol}://${req.get('host')}`;
+  return { url: `${baseUrl}/uploads/${filename}`, publicId: '', thumbnail: '' };
+};
+
+const deleteUploadedMedia = async ({ publicId, url, resourceType = 'image' } = {}) => {
+  if (publicId && process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET) {
+    await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+    return;
+  }
+  if (url && url.includes('/uploads/')) {
+    const filename = path.basename(new URL(url).pathname);
+    if (filename) await fs.promises.unlink(path.join(uploadDir, filename)).catch(() => {});
+  }
+};
+
+module.exports = { upload, postUpload, preparePostUpload, processUploadedFile, processUploadedMedia, deleteUploadedMedia, validateImageContent };
