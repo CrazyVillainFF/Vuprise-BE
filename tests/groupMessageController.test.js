@@ -2,12 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const Group = require('../models/Group');
 const GroupMessage = require('../models/GroupMessage');
-const { getMessages, sendMessage } = require('../controllers/groupMessageController');
+const { getMessages, sendMessage, deleteMessage } = require('../controllers/groupMessageController');
 
 const original = {};
-for (const [object, key] of [[Group, 'findOne'], [Group, 'updateOne'], [GroupMessage, 'create'], [GroupMessage, 'findOne'], [GroupMessage, 'find']]) original[`${object.modelName}.${key}`] = object[key];
+for (const [object, key] of [[Group, 'findOne'], [Group, 'updateOne'], [GroupMessage, 'create'], [GroupMessage, 'findOne'], [GroupMessage, 'find'], [GroupMessage, 'updateOne']]) original[`${object.modelName}.${key}`] = object[key];
 const restore = () => {
-  for (const [object, key] of [[Group, 'findOne'], [Group, 'updateOne'], [GroupMessage, 'create'], [GroupMessage, 'findOne'], [GroupMessage, 'find']]) object[key] = original[`${object.modelName}.${key}`];
+  for (const [object, key] of [[Group, 'findOne'], [Group, 'updateOne'], [GroupMessage, 'create'], [GroupMessage, 'findOne'], [GroupMessage, 'find'], [GroupMessage, 'updateOne']]) object[key] = original[`${object.modelName}.${key}`];
 };
 const response = () => ({ statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; }, set() {} });
 
@@ -54,5 +54,28 @@ test('group message length is validated before writing', async () => {
     await sendMessage({ params: { id: group._id }, user: { _id: '507f1f77bcf86cd799439012' }, body: { text: 'x'.repeat(5001) } }, res, (error) => { throw error; });
     assert.equal(res.statusCode, 400);
     assert.equal(created, false);
+  } finally { restore(); }
+});
+
+test('group message deletion supports per-user hiding and restricts delete-for-everyone to the sender', async () => {
+  const group = { _id: '507f1f77bcf86cd799439011' };
+  const actor = '507f1f77bcf86cd799439012';
+  const otherSender = '507f1f77bcf86cd799439013';
+  Group.findOne = () => ({ select: async () => group });
+  const message = { _id: '507f1f77bcf86cd799439014', sender: otherSender };
+  GroupMessage.findOne = async () => message;
+  let update;
+  GroupMessage.updateOne = async (_filter, changes) => { update = changes; };
+  const req = { params: { id: group._id, messageId: message._id }, user: { _id: actor }, query: { scope: 'me' } };
+  const hiddenRes = response();
+  try {
+    await deleteMessage(req, hiddenRes, (error) => { throw error; });
+    assert.deepEqual(update.$addToSet.hiddenFor, actor);
+    assert.equal(hiddenRes.body.scope, 'me');
+    req.query.scope = 'everyone';
+    const deniedRes = response();
+    await deleteMessage(req, deniedRes, (error) => { throw error; });
+    assert.equal(deniedRes.statusCode, 403);
+    assert.equal(message.deletedForEveryone, undefined);
   } finally { restore(); }
 });

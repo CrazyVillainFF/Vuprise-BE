@@ -6,6 +6,8 @@ const User = require('../models/User');
 const { isAcceptedPublicKeyPair } = require('../utils/publicEncryptionKeys');
 const { isValidEncryptedKeyBackup } = require('../utils/encryptedKeyBackup');
 const { normalizeDirectMessagePayload } = require('../utils/directMessagePayload');
+const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
+const fs = require('fs/promises');
 
 const hasAcceptedConnection = async (userId, peerId) => Boolean(await Connection.exists({
   status: 'accepted',
@@ -26,6 +28,15 @@ const getAuthorizedConversation = async (conversationId, userId) => {
   const peerId = conversation.participants.find((participant) => participant.toString() !== userId.toString());
   if (!peerId || !(await hasAcceptedConnection(userId, peerId))) return null;
   return { conversation, peerId };
+};
+
+const requireConversationParticipant = async (req, res, next) => {
+  try {
+    const authorized = await getAuthorizedConversation(req.params.conversationId, req.user._id);
+    if (!authorized) return res.status(404).json({ success: false, message: 'Conversation not found or no longer available.' });
+    req.authorizedConversation = authorized;
+    return next();
+  } catch (error) { return next(error); }
 };
 
 const getContacts = async (req, res, next) => {
@@ -172,11 +183,11 @@ const listConversations = async (req, res, next) => {
     ));
     const visibleConversationIds = visibleConversations.map(({ conversation }) => conversation._id);
     const latestMessages = visibleConversationIds.length ? await DirectMessage.aggregate([
-      { $match: { conversation: { $in: visibleConversationIds } } },
+      { $match: { conversation: { $in: visibleConversationIds }, hiddenFor: { $ne: req.user._id } } },
       { $sort: { createdAt: -1 } },
       { $group: {
         _id: '$conversation',
-        lastMessage: { $first: { _id: '$_id', createdAt: '$createdAt', sender: '$sender', text: '$text' } },
+        lastMessage: { $first: { _id: '$_id', createdAt: '$createdAt', sender: '$sender', text: '$text', imageUrl: '$imageUrl', deletedForEveryone: '$deletedForEveryone' } },
         unreadCount: { $sum: { $cond: [
           { $and: [
             { $ne: ['$sender', req.user._id] },
@@ -195,7 +206,10 @@ const listConversations = async (req, res, next) => {
       peer,
       displayName: conversation.displayNames.find(({ user }) => user.toString() === req.user._id.toString())?.name || '',
       lastMessageAt: conversation.lastMessageAt,
-      lastMessage: latestByConversation.get(conversation._id.toString())?.lastMessage || null,
+      lastMessage: (() => {
+        const latest = latestByConversation.get(conversation._id.toString())?.lastMessage || null;
+        return latest?.deletedForEveryone ? { ...latest, text: 'This message was deleted', imageUrl: '' } : latest;
+      })(),
       unreadCount: latestByConversation.get(conversation._id.toString())?.unreadCount || 0
     }));
     res.set('Cache-Control', 'private, no-store');
@@ -275,12 +289,28 @@ const deleteMessage = async (req, res, next) => {
     if (!authorized || !mongoose.isValidObjectId(req.params.messageId)) {
       return res.status(404).json({ success: false, message: 'Message not found.' });
     }
-    const message = await DirectMessage.findOneAndDelete({
+    const message = await DirectMessage.findOne({
       _id: req.params.messageId,
       conversation: authorized.conversation._id,
-      sender: req.user._id
+      hiddenFor: { $ne: req.user._id }
     });
-    if (!message) return res.status(404).json({ success: false, message: 'Only your own messages can be deleted.' });
+    if (!message) return res.status(404).json({ success: false, message: 'Message not found.' });
+    const scope = req.query.scope || req.body?.scope;
+    if (!['me', 'everyone'].includes(scope)) return res.status(400).json({ success: false, message: 'Choose whether to delete this message for you or everyone.' });
+    const isOwnMessage = String(message.sender) === String(req.user._id);
+    if (scope === 'everyone' && !isOwnMessage) return res.status(403).json({ success: false, message: 'You can delete for everyone only a message you sent.' });
+    if (scope === 'me') {
+      await DirectMessage.updateOne({ _id: message._id }, { $addToSet: { hiddenFor: req.user._id } });
+      return res.json({ success: true, scope, deletedMessageId: message._id });
+    }
+    const oldMedia = { publicId: message.imagePublicId, url: message.imageUrl };
+    message.text = '';
+    message.imageUrl = '';
+    message.imagePublicId = '';
+    message.deletedForEveryone = true;
+    message.editedAt = null;
+    await message.save();
+    if (oldMedia.url || oldMedia.publicId) await deleteUploadedMedia(oldMedia).catch(() => {});
 
     const latestMessage = await DirectMessage.findOne({ conversation: authorized.conversation._id })
       .sort({ createdAt: -1 }).select('createdAt').lean();
@@ -288,7 +318,7 @@ const deleteMessage = async (req, res, next) => {
       { _id: authorized.conversation._id },
       { $set: { lastMessageAt: latestMessage?.createdAt || authorized.conversation.createdAt } }
     );
-    res.json({ success: true, deletedMessageId: message._id });
+    res.json({ success: true, scope, message });
   } catch (error) { next(error); }
 };
 
@@ -305,7 +335,8 @@ const updateMessage = async (req, res, next) => {
     const message = await DirectMessage.findOne({
       _id: req.params.messageId,
       conversation: authorized.conversation._id,
-      sender: req.user._id
+      sender: req.user._id,
+      deletedForEveryone: { $ne: true }
     });
     if (!message) return res.status(404).json({ success: false, message: 'Only your own messages can be edited.' });
     if (typeof message.text !== 'string') {
@@ -324,7 +355,7 @@ const getMessages = async (req, res, next) => {
     if (!authorized) return res.status(404).json({ success: false, message: 'Conversation not found or no longer available.' });
 
     const [messages] = await Promise.all([
-      DirectMessage.find({ conversation: authorized.conversation._id })
+      DirectMessage.find({ conversation: authorized.conversation._id, hiddenFor: { $ne: req.user._id } })
         .sort({ createdAt: -1 }).limit(200).lean(),
       DirectMessage.updateMany(
         { conversation: authorized.conversation._id, sender: { $ne: req.user._id }, readBy: { $ne: req.user._id } },
@@ -337,9 +368,26 @@ const getMessages = async (req, res, next) => {
 };
 
 const sendMessage = async (req, res, next) => {
+  let media;
   try {
-    const authorized = await getAuthorizedConversation(req.params.conversationId, req.user._id);
+    const authorized = req.authorizedConversation || await getAuthorizedConversation(req.params.conversationId, req.user._id);
     if (!authorized) return res.status(404).json({ success: false, message: 'Conversation not found or no longer available.' });
+
+    if (req.file) {
+      const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+      if (text.length > 5000) {
+        if (req.file.path) await fs.unlink(req.file.path).catch(() => {});
+        return res.status(400).json({ success: false, message: 'Captions can contain up to 5000 characters.' });
+      }
+      media = await processUploadedMedia(req.file, req, 'direct-messages');
+      const messageTimestamp = new Date();
+      const [message] = await Promise.all([
+        DirectMessage.create({ conversation: authorized.conversation._id, sender: req.user._id, text, imageUrl: media.url, imagePublicId: media.publicId || '', readBy: [req.user._id], createdAt: messageTimestamp, updatedAt: messageTimestamp }),
+        Conversation.updateOne({ _id: authorized.conversation._id }, { $max: { lastMessageAt: messageTimestamp }, $pull: { hiddenFor: { $in: authorized.conversation.participants } } })
+      ]);
+      res.set('Cache-Control', 'private, no-store');
+      return res.status(201).json({ success: true, message });
+    }
 
     const normalizedPayload = normalizeDirectMessagePayload(req.body);
     if (normalizedPayload.error) return res.status(400).json({ success: false, message: normalizedPayload.error });
@@ -395,7 +443,11 @@ const sendMessage = async (req, res, next) => {
     await authorized.conversation.save();
 
     res.status(201).json({ success: true, message });
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (media) await deleteUploadedMedia({ publicId: media.publicId, url: media.url }).catch(() => {});
+    if (req.file?.path) await fs.unlink(req.file.path).catch(() => {});
+    next(error);
+  }
 };
 
 const syncLegacyMessages = async (req, res, next) => {
@@ -428,4 +480,4 @@ const syncLegacyMessages = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { getContacts, getOwnKey, getOwnKeyBackups, saveOwnKeyBackup, saveOwnKey, listConversations, openConversation, deleteConversationForUser, updateConversationName, deleteMessage, updateMessage, getMessages, sendMessage, syncLegacyMessages };
+module.exports = { getContacts, getOwnKey, getOwnKeyBackups, saveOwnKeyBackup, saveOwnKey, listConversations, openConversation, deleteConversationForUser, updateConversationName, deleteMessage, updateMessage, getMessages, sendMessage, syncLegacyMessages, requireConversationParticipant };

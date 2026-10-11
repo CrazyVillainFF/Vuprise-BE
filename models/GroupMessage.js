@@ -3,7 +3,12 @@ const mongoose = require('mongoose');
 const GroupMessageSchema = new mongoose.Schema({
   group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true },
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  text: { type: String, required: true, trim: true, maxlength: 5000 },
+  text: { type: String, trim: true, maxlength: 5000, default: '' },
+  imageUrl: { type: String, maxlength: 2048, default: '' },
+  imagePublicId: { type: String, maxlength: 255, default: '' },
+  editedAt: { type: Date, default: null },
+  hiddenFor: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  deletedForEveryone: { type: Boolean, default: false },
   clientMessageId: { type: String, maxlength: 80 }
 }, { timestamps: true });
 

@@ -22,7 +22,7 @@ const getAuthorizedGroup = async (id, userId) => {
 exports.listGroups = async (req, res, next) => {
   try {
     const [groups, invitations] = await Promise.all([
-      Group.find({ 'members.user': req.user._id }).populate('members.user', 'name headline profilePicture').populate({ path: 'lastMessage', select: 'text createdAt sender', populate: { path: 'sender', select: 'name profilePicture' } }).sort({ lastMessageAt: -1, updatedAt: -1 }),
+      Group.find({ 'members.user': req.user._id }).populate('members.user', 'name headline profilePicture').populate({ path: 'lastMessage', select: 'text imageUrl deletedForEveryone editedAt createdAt sender', populate: { path: 'sender', select: 'name profilePicture' } }).sort({ lastMessageAt: -1, updatedAt: -1 }),
       Group.find({ invitations: { $elemMatch: { user: req.user._id, status: 'pending' } } }).select('name photo owner invitations')
     ]);
     const pending = invitations.map((group) => ({ ...group.toObject(), invitations: group.invitations.filter((i) => String(i.user?._id || i.user) === req.user._id.toString() && i.status === 'pending') }));
@@ -163,7 +163,15 @@ exports.removeMember = async (req, res, next) => {
     if (result.error) return fail(res, ...result.error);
     const { group, member } = result; const target = group.memberFor(req.params.userId);
     if (!target) return fail(res, 404, 'Group member not found.');
-    if (!canRemoveMember(member.role, target.role, req.params.userId === req.user._id.toString())) return fail(res, 403, 'You do not have permission to remove this member.');
+    const isSelf = req.params.userId === req.user._id.toString();
+    if (isSelf && member.role === 'owner') {
+      const successor = group.members
+        .filter((entry) => String(entry.user?._id || entry.user) !== String(req.user._id))
+        .sort((a, b) => (a.role === 'admin' ? 0 : 1) - (b.role === 'admin' ? 0 : 1) || new Date(a.joinedAt) - new Date(b.joinedAt))[0];
+      if (!successor) return fail(res, 409, 'You are the only member. Delete the group instead of leaving it.');
+      successor.role = 'owner';
+      group.owner = successor.user?._id || successor.user;
+    } else if (!canRemoveMember(member.role, target.role, isSelf)) return fail(res, 403, 'You do not have permission to remove this member.');
     group.members = group.members.filter((m) => m.user.toString() !== req.params.userId);
     await group.save(); res.json({ success: true, group });
   } catch (error) { next(error); }
@@ -174,8 +182,10 @@ exports.deleteGroup = async (req, res, next) => {
     if (!mongoose.isValidObjectId(req.params.id)) return fail(res, 404, 'Group not found.');
     const group = await Group.findOne({ _id: req.params.id, owner: req.user._id });
     if (!group) return fail(res, 404, 'Group not found or only its owner can delete it.');
+    const messages = await GroupMessage.find({ group: group._id }).select('imageUrl imagePublicId').lean();
     await Promise.all([
       GroupMessage.deleteMany({ group: group._id }),
+      ...messages.filter((message) => message.imageUrl || message.imagePublicId).map((message) => deleteUploadedMedia({ publicId: message.imagePublicId, url: message.imageUrl }).catch(() => {})),
       group.photoPublicId ? deleteUploadedMedia({ publicId: group.photoPublicId, url: group.photo }).catch(() => {}) : Promise.resolve()
     ]);
     await group.deleteOne();
