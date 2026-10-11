@@ -2,15 +2,15 @@
 
 The web client is deployed on Vercel, while the API is an Express service described by `render.yaml`. Server-only credentials must be configured on the API service, not in `VITE_*` variables.
 
-## Password recovery (Resend)
+## Password recovery (Brevo transactional email)
 
-- Set `RESEND_API_KEY` in the Render API service environment. Keep it secret and do not add it to Vercel client variables.
+- Set `BREVO_API_KEY` in the Render API service environment. The server sends through Brevo's transactional HTTP endpoint (`POST https://api.brevo.com/v3/smtp/email`) using the `api-key` header; SMTP is not used. Keep the API key secret and do not add it to Vercel client variables.
 - Set `PASSWORD_RESET_PEPPER` to a long, random server-only secret. The Render blueprint generates one when it creates the service.
-- Set `CLIENT_URL` to `https://nexora-lac-three.vercel.app` (the blueprint default). This is the existing Vercel origin; no custom website domain is required.
-- `PASSWORD_RESET_FROM` controls the sender and defaults to `onboarding@resend.dev`. Keep it on the Render backend, never in a `VITE_*` variable. For development/testing, Resend's onboarding sender only works for recipients permitted by the Resend account. A verified sender domain is needed for unrestricted production delivery; no such production delivery is implied here.
-- If Resend rejects a sender or test recipient, the request fails visibly and the temporary token is invalidated; the UI must not show a successful-send state. Check the safe error category in the response and the Resend dashboard's email logs. The backend intentionally logs only a category, not the recipient, reset token, API key, or full provider error.
-- A successful Resend API response means the provider accepted the send request, not that the message reached the recipient's inbox. Verify a permitted test recipient before treating end-to-end delivery as confirmed.
-- On Render, configure `RESEND_API_KEY`, `PASSWORD_RESET_PEPPER`, `CLIENT_URL=https://nexora-lac-three.vercel.app`, and `PASSWORD_RESET_FROM=onboarding@resend.dev`. Redeploy the backend after changing environment values. The client only needs its existing API URL; the Resend key must never be configured in Vercel.
+- Set `CLIENT_URL` to `https://nexora-lac-three.vercel.app`. This is the existing Vercel origin; no custom website domain is required.
+- `PASSWORD_RESET_FROM` is the verified Brevo sender address and defaults to `vupriseofficial@gmail.com`. Configure it on the Render backend only, never in a `VITE_*` variable. Brevo must show this sender as verified and allow transactional email sending for the account.
+- If Brevo rejects the sender, recipient, or request, the API returns an error, invalidates the temporary reset token, and the UI does not show a successful-send state. The backend logs only a safe error category, not the recipient, reset token, API key, request headers, or provider response body.
+- A successful Brevo API response means the provider accepted the send request, not that the message reached the recipient's inbox. Verify actual delivery to an intended recipient before treating end-to-end delivery as confirmed.
+- On Render, configure `BREVO_API_KEY`, `PASSWORD_RESET_FROM=vupriseofficial@gmail.com`, `PASSWORD_RESET_PEPPER`, and `CLIENT_URL=https://nexora-lac-three.vercel.app`. Redeploy the backend after changing environment values. The client only needs its existing API URL; the Brevo key must never be configured in Vercel.
 
 ## Direct video uploads
 

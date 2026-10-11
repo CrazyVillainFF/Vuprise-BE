@@ -3,7 +3,7 @@ const PasswordResetState = require('../models/PasswordResetState');
 const PasswordResetCounter = require('../models/PasswordResetCounter');
 const { createResetToken, isResetToken, hashResetToken } = require('../utils/passwordResetSecurity');
 
-const genericRequestMessage = 'If an account matches and Resend accepts delivery to this address, a reset link will be sent. Test-mode recipients may need to be permitted in your Resend account.';
+const genericRequestMessage = 'If an account matches and the email provider accepts delivery to this address, a reset link will be sent.';
 const defaultClientUrl = 'https://nexora-lac-three.vercel.app';
 const WINDOW_MS = 30 * 60 * 1000;
 const COUNTER_TTL_MS = 48 * 60 * 60 * 1000;
@@ -39,8 +39,8 @@ const releaseCounter = async (key, windowStartedAt) => {
 };
 
 const getMailConfiguration = () => {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.PASSWORD_RESET_FROM || 'onboarding@resend.dev';
+  const apiKey = process.env.BREVO_API_KEY;
+  const from = process.env.PASSWORD_RESET_FROM || 'vupriseofficial@gmail.com';
   let clientUrl;
 
   try {
@@ -53,7 +53,7 @@ const getMailConfiguration = () => {
   if ((clientUrl.protocol !== 'https:' && !isLocalHttp) || clientUrl.username || clientUrl.password || clientUrl.search || clientUrl.hash || (clientUrl.pathname !== '/' && clientUrl.pathname !== '')) {
     return { error: 'The password-reset website URL must be a secure website origin.' };
   }
-  if (!apiKey) return { error: 'Resend email delivery is not configured on the server.' };
+  if (!apiKey) return { error: 'Brevo email delivery is not configured on the server.' };
   if (!/^(?:[^<>\r\n]+\s<)?[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+(?:>)?$/.test(from)) {
     return { error: 'The configured password-reset sender address is invalid.' };
   }
@@ -61,39 +61,43 @@ const getMailConfiguration = () => {
   return { apiKey, from, clientUrl };
 };
 
-const classifyResendError = (providerError) => {
-  const detail = `${providerError?.name || ''} ${providerError?.message || ''} ${providerError?.statusCode || ''}`.toLowerCase();
-  if (/recipient|testing email|test-mode|only send.*own email|not authorized.*email/.test(detail)) {
+const classifyBrevoError = (providerError) => {
+  const detail = `${providerError?.name || ''} ${providerError?.message || ''} ${providerError?.status || ''} ${providerError?.code || ''}`.toLowerCase();
+  if (/recipient|email.*not valid|contact.*not found|blocked|blacklist|not authorized.*email/.test(detail)) {
     return {
       category: 'recipient_not_permitted',
-      message: 'Resend rejected this test recipient. With onboarding@resend.dev, the recipient must be permitted by your Resend account. No email was sent.'
+      message: 'Brevo rejected the recipient address. Check that the address is valid and permitted by your Brevo account. No email was sent.'
     };
   }
   if (/sender|\bfrom\b|domain.*verif|verif.*domain/.test(detail)) {
     return {
       category: 'sender_rejected',
-      message: 'Resend rejected the configured sender. Check PASSWORD_RESET_FROM and your Resend sender/domain settings. No email was sent.'
+      message: 'Brevo rejected the configured sender. Check PASSWORD_RESET_FROM and verify that sender in Brevo. No email was sent.'
     };
   }
   return {
     category: 'provider_rejected',
-    message: 'Resend could not accept the password-reset email. No email was sent; check the Resend logs and try again.'
+    message: 'Brevo could not accept the password-reset email. No email was sent; check the Brevo transactional email logs and try again.'
   };
 };
 
 const sendResetEmail = async (to, resetUrl, mailConfig) => {
-  // Keep the provider SDK and secret on the server only.
-  const { Resend } = require('resend');
-  const resend = new Resend(mailConfig.apiKey);
-  const { data, error } = await resend.emails.send({
-    from: mailConfig.from,
-    to: [to],
-    subject: 'Reset your Vuprise password',
-    text: `Use this link to reset your Vuprise password. It expires in 10 minutes and can only be used once: ${resetUrl.href}\n\nIf you did not request this, ignore this message.`,
-    html: `<p>Use the link below to reset your Vuprise password. It expires in 10 minutes and can only be used once.</p><p><a href="${resetUrl.href}">Reset password</a></p><p>If you did not request this, ignore this message.</p>`
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': mailConfig.apiKey, 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({
+      sender: { email: mailConfig.from, name: 'Vuprise' },
+      to: [{ email: to }],
+      subject: 'Reset your Vuprise password',
+      textContent: `Use this link to reset your Vuprise password. It expires in 10 minutes and can only be used once: ${resetUrl.href}\n\nIf you did not request this, ignore this message.`,
+      htmlContent: `<p>Use the link below to reset your Vuprise password. It expires in 10 minutes and can only be used once.</p><p><a href="${resetUrl.href}">Reset password</a></p><p>If you did not request this, ignore this message.</p>`
+    })
   });
-  if (error) throw classifyResendError(error);
-  if (!data?.id) throw classifyResendError({ name: 'missing_message_id' });
+  let providerBody = {};
+  try { providerBody = await response.json(); } catch { /* A malformed response is handled as provider rejection. */ }
+  if (!response.ok || typeof providerBody.messageId !== 'string' || !providerBody.messageId) {
+    throw classifyBrevoError({ status: response.status, ...providerBody });
+  }
 };
 
 const requestPasswordReset = async (req, res, next) => {
@@ -140,7 +144,7 @@ const requestPasswordReset = async (req, res, next) => {
         PasswordResetState.updateOne({ user: user._id, resetTokenHash: tokenHash }, { $set: { resetTokenHash: '', resetTokenExpiresAt: null } }),
         releaseCounter(userKey(user._id), accountSlot.windowStartedAt)
       ]);
-      const deliveryError = mailError?.category ? mailError : classifyResendError(mailError);
+      const deliveryError = mailError?.category ? mailError : classifyBrevoError(mailError);
       console.error('[Password Reset] Email delivery failed:', deliveryError.category);
       return res.status(502).json({ success: false, code: deliveryError.category, message: deliveryError.message });
     }
