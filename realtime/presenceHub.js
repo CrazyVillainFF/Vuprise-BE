@@ -7,6 +7,8 @@ const sessionsByUser = new Map();
 const watchersByUser = new Map();
 const typingStates = new Map();
 const privacyByUser = new Map();
+const lastSeenByUser = new Map();
+const lastSeenWriteAtByUser = new Map();
 
 const userKey = (id) => String(id);
 const send = (session, event, payload) => {
@@ -25,7 +27,7 @@ function publishPresence(id, hidden) {
   const online = (sessionsByUser.get(key)?.size || 0) > 0;
   for (const sessionId of [...watchers]) {
     const session = sessions.get(sessionId);
-    if (session) send(session, 'presence', { userId: key, state: isHidden ? 'hidden' : online ? 'online' : 'offline' });
+    if (session) send(session, 'presence', { userId: key, state: isHidden ? 'hidden' : online ? 'online' : 'offline', ...(!isHidden && !online && lastSeenByUser.get(key) ? { lastSeenAt: lastSeenByUser.get(key) } : {}) });
   }
 }
 
@@ -91,7 +93,8 @@ function replaceWatches(userId, sessionId, targetIds) {
     watchersByUser.get(targetId).add(session.id);
     const targetSessions = sessionsByUser.get(targetId);
     const hidden = Boolean(privacyByUser.get(targetId));
-    send(session, 'presence', { userId: targetId, state: hidden ? 'hidden' : targetSessions?.size ? 'online' : 'offline' });
+    const online = Boolean(targetSessions?.size);
+    send(session, 'presence', { userId: targetId, state: hidden ? 'hidden' : online ? 'online' : 'offline', ...(!hidden && !online && lastSeenByUser.get(targetId) ? { lastSeenAt: lastSeenByUser.get(targetId) } : {}) });
   }
   return true;
 }
@@ -104,6 +107,26 @@ function setHidden(userId, hidden) {
     if (session) session.hidden = Boolean(hidden);
   }
   publishPresence(key, Boolean(hidden));
+}
+
+function setLastSeen(userId, value) {
+  const key = userKey(userId);
+  if (value) lastSeenByUser.set(key, new Date(value).toISOString());
+  else lastSeenByUser.delete(key);
+  publishPresence(key);
+}
+
+function shouldPersistLastSeen(userId, now = Date.now(), intervalMs = 60_000) {
+  const key = userKey(userId);
+  const previous = lastSeenWriteAtByUser.get(key) || 0;
+  if (now - previous < intervalMs) return false;
+  lastSeenWriteAtByUser.set(key, now);
+  if (lastSeenWriteAtByUser.size > 10000) {
+    for (const [storedKey, writtenAt] of lastSeenWriteAtByUser) {
+      if (now - writtenAt > 24 * 60 * 60 * 1000) lastSeenWriteAtByUser.delete(storedKey);
+    }
+  }
+  return true;
 }
 
 function sendTyping(recipients, payload) {
@@ -145,4 +168,4 @@ function expireStaleSessions(now = Date.now()) {
 const expirationTimer = setInterval(expireStaleSessions, 15_000);
 expirationTimer.unref?.();
 
-module.exports = { HEARTBEAT_TTL_MS, TYPING_TTL_MS, createSession, removeSession, heartbeat, replaceWatches, setHidden, setTyping, getSessionCount, getSession, expireStaleSessions };
+module.exports = { HEARTBEAT_TTL_MS, TYPING_TTL_MS, createSession, removeSession, heartbeat, replaceWatches, setHidden, setLastSeen, shouldPersistLastSeen, setTyping, getSessionCount, getSession, expireStaleSessions };

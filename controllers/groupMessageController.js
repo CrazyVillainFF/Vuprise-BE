@@ -3,6 +3,7 @@ const fs = require('fs/promises');
 const Group = require('../models/Group');
 const GroupMessage = require('../models/GroupMessage');
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
+const { normalizeReaction, toggleReaction } = require('../utils/messageReactions');
 
 const fail = (res, status, message) => res.status(status).json({ success: false, message });
 const PAGE_SIZE = 50;
@@ -157,4 +158,18 @@ const deleteMessage = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { getMessages, sendMessage, updateMessage, deleteMessage, requireGroupMember };
+const toggleMessageReaction = async (req, res, next) => {
+  try {
+    const group = req.authorizedGroup || await authorizedGroup(req.params.id, req.user._id);
+    if (!group || !mongoose.isValidObjectId(req.params.messageId)) return fail(res, 404, 'Message not found.');
+    const emoji = normalizeReaction(req.body?.emoji);
+    if (!emoji) return fail(res, 400, 'Choose one of the supported message reactions.');
+    const message = await GroupMessage.findOne({ _id: req.params.messageId, group: group._id, hiddenFor: { $ne: req.user._id }, deletedForEveryone: { $ne: true } });
+    if (!message) return fail(res, 404, 'Message not found.');
+    toggleReaction(message, req.user._id, emoji);
+    await message.save();
+    res.json({ success: true, reactions: message.reactions });
+  } catch (error) { next(error); }
+};
+
+module.exports = { getMessages, sendMessage, updateMessage, deleteMessage, toggleMessageReaction, requireGroupMember };

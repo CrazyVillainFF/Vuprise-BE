@@ -1,5 +1,10 @@
 const mongoose = require('mongoose');
 
+const ReactionSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  emoji: { type: String, required: true, maxlength: 8 },
+}, { _id: false });
+
 const DirectMessageSchema = new mongoose.Schema({
   conversation: { type: mongoose.Schema.Types.ObjectId, ref: 'Conversation', required: true, index: true },
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
@@ -18,7 +23,8 @@ const DirectMessageSchema = new mongoose.Schema({
     value: { type: String, required: true, maxlength: 2048 }
   }],
   editedAt: { type: Date, default: null },
-  readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }]
+  readBy: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  reactions: { type: [ReactionSchema], default: [] }
 }, { timestamps: true });
 
 DirectMessageSchema.index({ conversation: 1, createdAt: -1 });

@@ -19,12 +19,22 @@ exports.events = async (req, res, next) => {
     if (!res.destroyed && !res.writableEnded) res.write(': keepalive\n\n');
   }, 20_000);
   keepAlive.unref?.();
-  res.on('close', () => { clearInterval(keepAlive); hub.removeSession(session); });
+  res.on('close', () => {
+    clearInterval(keepAlive);
+    if (hub.removeSession(session) && hub.getSessionCount(session.userId) === 0) {
+      const lastSeenAt = new Date();
+      User.updateOne({ _id: session.userId }, { $set: { lastSeenAt } }).then(() => hub.setLastSeen(session.userId, lastSeenAt)).catch(() => {});
+    }
+  });
   } catch (error) { next(error); }
 };
 
 exports.heartbeat = (req, res) => {
   if (!hub.heartbeat(req.user._id, req.body.sessionId)) return fail(res, 401, 'Realtime session expired. Reconnect to continue.');
+  if (hub.shouldPersistLastSeen(req.user._id)) {
+    const lastSeenAt = new Date();
+    User.updateOne({ _id: req.user._id }, { $set: { lastSeenAt } }).then(() => hub.setLastSeen(req.user._id, lastSeenAt)).catch(() => {});
+  }
   res.json({ success: true, timestamp: Date.now() });
 };
 
@@ -50,18 +60,24 @@ exports.watchPresence = async (req, res, next) => {
       return fail(res, 400, 'Provide a valid realtime session and up to 100 user IDs.');
     }
     const allowed = await getVisiblePresenceIds(req.user._id, [...new Set(userIds.map(String))]);
-    const preferences = await User.find({ _id: { $in: allowed } }).select('+hideActivity _id');
-    for (const target of preferences) hub.setHidden(target._id, target.hideActivity);
+    const preferences = await User.find({ _id: { $in: allowed } }).select('+hideActivity +lastSeenAt _id');
+    for (const target of preferences) { hub.setHidden(target._id, target.hideActivity); hub.setLastSeen(target._id, target.lastSeenAt); }
     if (!hub.replaceWatches(req.user._id, sessionId, allowed)) return fail(res, 401, 'Realtime session expired. Reconnect to continue.');
     res.json({ success: true, watching: allowed.length });
   } catch (error) { next(error); }
 };
 
-exports.logout = (req, res) => {
+exports.logout = async (req, res, next) => {
+  try {
   const session = hub.getSession(req.body.sessionId);
   if (!session || session.userId !== String(req.user._id)) return fail(res, 404, 'Realtime session not found.');
-  hub.removeSession(session);
+  if (hub.removeSession(session) && hub.getSessionCount(session.userId) === 0) {
+    const lastSeenAt = new Date();
+    await User.updateOne({ _id: session.userId }, { $set: { lastSeenAt } });
+    hub.setLastSeen(session.userId, lastSeenAt);
+  }
   res.json({ success: true });
+  } catch (error) { next(error); }
 };
 
 exports.typing = (scopeType) => async (req, res, next) => {

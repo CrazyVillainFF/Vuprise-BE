@@ -6,6 +6,7 @@ const User = require('../models/User');
 const { isAcceptedPublicKeyPair } = require('../utils/publicEncryptionKeys');
 const { isValidEncryptedKeyBackup } = require('../utils/encryptedKeyBackup');
 const { normalizeDirectMessagePayload } = require('../utils/directMessagePayload');
+const { normalizeReaction, toggleReaction } = require('../utils/messageReactions');
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
 const fs = require('fs/promises');
 
@@ -349,6 +350,20 @@ const updateMessage = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+const toggleMessageReaction = async (req, res, next) => {
+  try {
+    const authorized = await getAuthorizedConversation(req.params.conversationId, req.user._id);
+    if (!authorized || !mongoose.isValidObjectId(req.params.messageId)) return res.status(404).json({ success: false, message: 'Message not found.' });
+    const emoji = normalizeReaction(req.body?.emoji);
+    if (!emoji) return res.status(400).json({ success: false, message: 'Choose one of the supported message reactions.' });
+    const message = await DirectMessage.findOne({ _id: req.params.messageId, conversation: authorized.conversation._id, hiddenFor: { $ne: req.user._id }, deletedForEveryone: { $ne: true } });
+    if (!message) return res.status(404).json({ success: false, message: 'Message not found.' });
+    toggleReaction(message, req.user._id, emoji);
+    await message.save();
+    res.json({ success: true, reactions: message.reactions });
+  } catch (error) { next(error); }
+};
+
 const getMessages = async (req, res, next) => {
   try {
     const authorized = await getAuthorizedConversation(req.params.conversationId, req.user._id);
@@ -480,4 +495,4 @@ const syncLegacyMessages = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { getContacts, getOwnKey, getOwnKeyBackups, saveOwnKeyBackup, saveOwnKey, listConversations, openConversation, deleteConversationForUser, updateConversationName, deleteMessage, updateMessage, getMessages, sendMessage, syncLegacyMessages, requireConversationParticipant };
+module.exports = { getContacts, getOwnKey, getOwnKeyBackups, saveOwnKeyBackup, listConversations, openConversation, deleteConversationForUser, updateConversationName, deleteMessage, updateMessage, toggleMessageReaction, getMessages, sendMessage, syncLegacyMessages, requireConversationParticipant };

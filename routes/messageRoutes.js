@@ -13,6 +13,7 @@ const {
   updateConversationName,
   deleteMessage,
   updateMessage,
+  toggleMessageReaction,
   getMessages,
   sendMessage,
   syncLegacyMessages
@@ -33,6 +34,7 @@ router.patch('/conversations/:conversationId', updateConversationName);
 router.get('/conversations/:conversationId/messages', getMessages);
 router.delete('/conversations/:conversationId/messages/:messageId', deleteMessage);
 router.put('/conversations/:conversationId/messages/:messageId', updateMessage);
+router.put('/conversations/:conversationId/messages/:messageId/reactions', toggleMessageReaction);
 router.post('/conversations/:conversationId/messages', requireConversationParticipant, upload.single('image'), validateImageContent, sendMessage);
 router.post('/conversations/:conversationId/messages/sync-legacy', syncLegacyMessages);
 

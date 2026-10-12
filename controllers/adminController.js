@@ -244,7 +244,7 @@ const listInbox = (type) => async (req, res, next) => {
     const filter = { type: Array.isArray(type) ? { $in: type } : type };
     if (['pending', 'under_review', 'approved', 'rejected'].includes(req.query.status)) filter.status = req.query.status;
     const [requests, total] = await Promise.all([
-      SupportRequest.find(filter).select('-__v').populate('user', 'name email moderationStatus moderationExpiresAt moderationReason').populate('reportedUser', 'name email moderationStatus moderationExpiresAt').populate('reportedPost', 'author content image mediaType videoUrl createdAt').populate('adminNotes.admin', 'name email').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      SupportRequest.find(filter).select('-__v').populate('user', 'name email moderationStatus moderationExpiresAt moderationReason').populate('reportedUser', 'name email moderationStatus moderationExpiresAt').populate('reportedPost', 'author content image mediaType videoUrl createdAt').populate({ path: 'reportedMessage', select: '_id sender createdAt' }).populate('adminNotes.admin', 'name email').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
       SupportRequest.countDocuments(filter)
     ]);
     res.json({ success: true, requests, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });

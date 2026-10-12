@@ -143,6 +143,11 @@ const UserSchema = new mongoose.Schema({
     default: false,
     select: false
   },
+  lastSeenAt: {
+    type: Date,
+    default: null,
+    select: false
+  },
   encryptionPublicKey: {
     type: String,
     default: '',

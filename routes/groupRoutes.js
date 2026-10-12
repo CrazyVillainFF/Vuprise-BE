@@ -11,6 +11,7 @@ router.post('/', upload.single('image'), validateImageContent, controller.create
 router.get('/:id/messages', messageController.getMessages);
 router.post('/:id/messages', messageController.requireGroupMember, upload.single('image'), validateImageContent, messageController.sendMessage);
 router.put('/:id/messages/:messageId', messageController.updateMessage);
+router.put('/:id/messages/:messageId/reactions', messageController.requireGroupMember, messageController.toggleMessageReaction);
 router.delete('/:id/messages/:messageId', messageController.deleteMessage);
 router.delete('/:id', controller.deleteGroup);
 router.post('/:id/invitations/:action(accept|decline)', controller.respondInvitation);

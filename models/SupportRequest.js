@@ -15,6 +15,11 @@ const SupportRequestSchema = new mongoose.Schema({
   category: { type: String, trim: true, maxlength: 80, default: '' },
   reportedUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   reportedPost: { type: mongoose.Schema.Types.ObjectId, ref: 'Post', default: null },
+  reportedMessage: { type: mongoose.Schema.Types.ObjectId, refPath: 'reportedMessageModel', default: null },
+  reportedMessageModel: { type: String, enum: ['DirectMessage', 'GroupMessage'], default: undefined },
+  reportedMessageScope: { type: String, enum: ['direct', 'group'], default: undefined },
+  reportedThread: { type: mongoose.Schema.Types.ObjectId, refPath: 'reportedThreadModel', default: null },
+  reportedThreadModel: { type: String, enum: ['Conversation', 'Group'], default: undefined },
   evidenceUrls: [{ type: String, maxlength: 2048 }],
   status: { type: String, enum: ['pending', 'under_review', 'approved', 'rejected'], default: 'pending', index: true },
   priority: { type: String, enum: ['low', 'normal', 'high', 'urgent'], default: 'normal', index: true },
@@ -29,5 +34,6 @@ SupportRequestSchema.index({ type: 1, status: 1, createdAt: -1 });
 SupportRequestSchema.index({ email: 1, createdAt: -1 });
 SupportRequestSchema.index({ reportedUser: 1, createdAt: -1 });
 SupportRequestSchema.index({ reportedPost: 1, createdAt: -1 });
+SupportRequestSchema.index({ reportedMessage: 1, createdAt: -1 });
 
 module.exports = mongoose.model('SupportRequest', SupportRequestSchema);

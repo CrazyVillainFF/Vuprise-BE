@@ -1,5 +1,10 @@
 const mongoose = require('mongoose');
 
+const ReactionSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  emoji: { type: String, required: true, maxlength: 8 },
+}, { _id: false });
+
 const GroupMessageSchema = new mongoose.Schema({
   group: { type: mongoose.Schema.Types.ObjectId, ref: 'Group', required: true },
   sender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -9,7 +14,8 @@ const GroupMessageSchema = new mongoose.Schema({
   editedAt: { type: Date, default: null },
   hiddenFor: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   deletedForEveryone: { type: Boolean, default: false },
-  clientMessageId: { type: String, maxlength: 80 }
+  clientMessageId: { type: String, maxlength: 80 },
+  reactions: { type: [ReactionSchema], default: [] }
 }, { timestamps: true });
 
 GroupMessageSchema.index({ group: 1, createdAt: -1, _id: -1 });

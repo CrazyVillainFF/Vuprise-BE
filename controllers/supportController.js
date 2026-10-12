@@ -24,7 +24,7 @@ function consumeRateLimit(key, now = Date.now()) {
 
 const createRequest = async (req, res, next) => {
   try {
-    const { type, email, subject, message, category = '', userId = '', reportedUser = '', reportedPost = '', evidenceUrls = [], website = '' } = req.body || {};
+    const { type, email, subject, message, category = '', userId = '', reportedUser = '', reportedPost = '', reportedMessage = '', reportedMessageScope = '', reportedThreadId = '', evidenceUrls = [], website = '' } = req.body || {};
     if (website) return res.status(202).json({ success: true, message: 'Your request has been received.' });
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
     const validTypes = ['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry', 'general_help', 'report', 'other'];
@@ -33,7 +33,11 @@ const createRequest = async (req, res, next) => {
       typeof message !== 'string' || message.trim().length < 10 || message.trim().length > 5000 ||
       typeof category !== 'string' || category.length > 80 ||
       (userId && !/^[a-f\d]{24}$/i.test(userId)) || (reportedUser && !/^[a-f\d]{24}$/i.test(reportedUser)) ||
-      (reportedPost && !/^[a-f\d]{24}$/i.test(reportedPost)) || !Array.isArray(evidenceUrls) || evidenceUrls.length > 5 ||
+      (reportedPost && !/^[a-f\d]{24}$/i.test(reportedPost)) ||
+      (reportedMessage && !/^[a-f\d]{24}$/i.test(reportedMessage)) ||
+      (reportedThreadId && !/^[a-f\d]{24}$/i.test(reportedThreadId)) ||
+      (reportedMessage && !['direct', 'group'].includes(reportedMessageScope)) ||
+      (reportedMessage && !reportedThreadId) || (!reportedMessage && (reportedMessageScope || reportedThreadId)) || !Array.isArray(evidenceUrls) || evidenceUrls.length > 5 ||
       evidenceUrls.some((value) => typeof value !== 'string' || value.length > 2048 || !/^https:\/\//i.test(value))) {
       return res.status(400).json({ success: false, message: 'Check the request type, email, subject, and message, then try again.' });
     }
@@ -54,15 +58,36 @@ const createRequest = async (req, res, next) => {
 
     const validId = (value) => typeof value === 'string' && /^[a-f\d]{24}$/i.test(value);
     if (type === 'report') {
-      if (!validId(reportedUser) && !validId(reportedPost)) return res.status(400).json({ success: false, message: 'Choose the reported account or post.' });
+      if (!validId(reportedUser) && !validId(reportedPost) && !validId(reportedMessage)) return res.status(400).json({ success: false, message: 'Choose the reported account, post, or message.' });
       if (validId(reportedUser) && !(await User.exists({ _id: reportedUser, moderationStatus: { $ne: 'deleted' } }))) return res.status(404).json({ success: false, message: 'Reported account not found.' });
       if (validId(reportedPost) && !(await require('../models/Post').exists({ _id: reportedPost }))) return res.status(404).json({ success: false, message: 'Reported post not found.' });
+      if (validId(reportedMessage)) {
+        if (!req.user || String(req.user.email).toLowerCase() !== normalizedEmail) return res.status(401).json({ success: false, message: 'Sign in with your account email to report a message.' });
+        if (reportedMessageScope === 'direct') {
+          const [conversation, targetMessage] = await Promise.all([
+            require('../models/Conversation').exists({ _id: reportedThreadId, participants: req.user._id, hiddenFor: { $ne: req.user._id } }),
+            require('../models/DirectMessage').exists({ _id: reportedMessage, conversation: reportedThreadId, hiddenFor: { $ne: req.user._id }, deletedForEveryone: { $ne: true } })
+          ]);
+          if (!conversation || !targetMessage) return res.status(404).json({ success: false, message: 'The reported message is not available.' });
+        } else {
+          const [group, targetMessage] = await Promise.all([
+            require('../models/Group').exists({ _id: reportedThreadId, 'members.user': req.user._id }),
+            require('../models/GroupMessage').exists({ _id: reportedMessage, group: reportedThreadId, hiddenFor: { $ne: req.user._id }, deletedForEveryone: { $ne: true } })
+          ]);
+          if (!group || !targetMessage) return res.status(404).json({ success: false, message: 'The reported message is not available.' });
+        }
+      }
     }
     const item = await SupportRequest.create({
       type, email: normalizedEmail, user: associatedUser,
       subject: subject.trim(), message: message.trim(), category: category.trim(),
       reportedUser: type === 'report' && validId(reportedUser) ? reportedUser : null,
       reportedPost: type === 'report' && validId(reportedPost) ? reportedPost : null,
+      reportedMessage: type === 'report' && validId(reportedMessage) ? reportedMessage : null,
+      reportedMessageScope: type === 'report' && validId(reportedMessage) ? reportedMessageScope : undefined,
+      reportedMessageModel: type === 'report' && validId(reportedMessage) ? (reportedMessageScope === 'direct' ? 'DirectMessage' : 'GroupMessage') : undefined,
+      reportedThread: type === 'report' && validId(reportedMessage) ? reportedThreadId : null,
+      reportedThreadModel: type === 'report' && validId(reportedMessage) ? (reportedMessageScope === 'direct' ? 'Conversation' : 'Group') : undefined,
       evidenceUrls: evidenceUrls.map((value) => value.trim()),
       status: 'pending', priority: 'normal'
     });
