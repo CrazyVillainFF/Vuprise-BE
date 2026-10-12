@@ -32,6 +32,13 @@ const EncryptedKeyBackupSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 }, { _id: true });
 
+const ModerationWarningSchema = new mongoose.Schema({
+  reason: { type: String, required: true, trim: true, maxlength: 1000 },
+  issuedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  createdAt: { type: Date, default: Date.now },
+  acknowledgedAt: { type: Date, default: null },
+}, { _id: true });
+
 const UserSchema = new mongoose.Schema({
   name: {
     type: String,
@@ -162,7 +169,11 @@ const UserSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     min: 0
-  }
+  },
+  moderationStatus: { type: String, enum: ['active', 'temporary_ban', 'permanent_ban', 'deletion_pending', 'deleted'], default: 'active', select: false, index: true },
+  moderationExpiresAt: { type: Date, default: null, select: false, index: true },
+  moderationReason: { type: String, default: '', maxlength: 1000, select: false },
+  moderationWarnings: { type: [ModerationWarningSchema], default: [], select: false },
 }, {
   timestamps: true,
   toJSON: { virtuals: true },

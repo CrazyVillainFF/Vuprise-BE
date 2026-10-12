@@ -1,5 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { isAdminEmail } = require('../utils/adminAccess');
+const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
 
 const generateToken = (user) => {
   if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured before issuing a session.');
@@ -86,6 +88,11 @@ const register = async (req, res, next) => {
     // Return user without password
     const userObj = user.toObject();
     delete userObj.password;
+    delete userObj.moderationStatus;
+    delete userObj.moderationExpiresAt;
+    delete userObj.moderationReason;
+    delete userObj.moderationWarnings;
+    userObj.isAdmin = isAdminEmail(user.email);
 
     res.status(201).json({
       success: true,
@@ -113,7 +120,7 @@ const login = async (req, res, next) => {
     }
 
     // Check user exists with password field selected
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password +hideActivity');
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password +hideActivity +moderationStatus +moderationExpiresAt +moderationReason +moderationWarnings');
 
     if (!user) {
       return res.status(401).json({
@@ -130,16 +137,32 @@ const login = async (req, res, next) => {
       });
     }
 
+    const restriction = await getAccountRestriction(user);
+    if (restriction) {
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_RESTRICTED',
+        restriction,
+        message: restriction.status === 'temporary_ban' ? 'Your account is temporarily restricted.' : restriction.status === 'deletion_pending' ? 'Your account deletion is being completed.' : 'Your account is permanently restricted.'
+      });
+    }
+
     const token = generateToken(user);
 
     const userObj = user.toObject();
     delete userObj.password;
+    delete userObj.moderationStatus;
+    delete userObj.moderationExpiresAt;
+    delete userObj.moderationReason;
+    delete userObj.moderationWarnings;
+    userObj.isAdmin = isAdminEmail(user.email);
 
     res.status(200).json({
       success: true,
       message: 'Signed in successfully.',
       token,
-      user: userObj
+      user: userObj,
+      pendingWarnings: getPendingWarnings(user)
     });
   } catch (error) {
     next(error);
@@ -151,7 +174,7 @@ const login = async (req, res, next) => {
 // @access  Private
 const getMe = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('+hideActivity')
+    const user = await User.findById(req.user._id).select('+hideActivity +moderationWarnings')
       .populate('connections', 'name headline profilePicture company jobTitle')
       .populate('followers', 'name headline profilePicture')
       .populate('following', 'name headline profilePicture');
@@ -163,9 +186,16 @@ const getMe = async (req, res, next) => {
       });
     }
 
+    const safeUser = user.toObject();
+    delete safeUser.moderationStatus;
+    delete safeUser.moderationExpiresAt;
+    delete safeUser.moderationReason;
+    delete safeUser.moderationWarnings;
+    safeUser.isAdmin = isAdminEmail(user.email);
     res.status(200).json({
       success: true,
-      user
+      user: safeUser,
+      pendingWarnings: getPendingWarnings(user)
     });
   } catch (error) {
     next(error);
@@ -226,9 +256,21 @@ const updatePassword = async (req, res, next) => {
   }
 };
 
+const acknowledgeWarning = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select('+moderationWarnings');
+    const warning = user?.moderationWarnings.id(req.params.warningId);
+    if (!warning) return res.status(404).json({ success: false, message: 'Warning not found.' });
+    if (!warning.acknowledgedAt) warning.acknowledgedAt = new Date();
+    await user.save();
+    res.json({ success: true, warningId: warning._id, acknowledgedAt: warning.acknowledgedAt });
+  } catch (error) { next(error); }
+};
+
 module.exports = {
   register,
   login,
   getMe,
-  updatePassword
+  updatePassword,
+  acknowledgeWarning
 };

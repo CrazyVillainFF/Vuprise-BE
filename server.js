@@ -19,6 +19,8 @@ const messageRoutes = require('./routes/messageRoutes');
 const groupRoutes = require('./routes/groupRoutes');
 const realtimeRoutes = require('./routes/realtimeRoutes');
 const { cleanupAbandonedVideoUploads } = require('./controllers/videoUploadController');
+const adminRoutes = require('./routes/adminRoutes');
+const supportRoutes = require('./routes/supportRoutes');
 
 const app = express();
 
@@ -240,6 +242,8 @@ app.get('/api/health', (req, res) => {
 
 // API Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/support', supportRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/posts', postRoutes);
 // Comments are nested under posts for create/list operations (the client calls
