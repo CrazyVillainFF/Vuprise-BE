@@ -495,4 +495,4 @@ const syncLegacyMessages = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { getContacts, getOwnKey, getOwnKeyBackups, saveOwnKeyBackup, listConversations, openConversation, deleteConversationForUser, updateConversationName, deleteMessage, updateMessage, toggleMessageReaction, getMessages, sendMessage, syncLegacyMessages, requireConversationParticipant };
+module.exports = { getContacts, getOwnKey, saveOwnKey, getOwnKeyBackups, saveOwnKeyBackup, listConversations, openConversation, deleteConversationForUser, updateConversationName, deleteMessage, updateMessage, toggleMessageReaction, getMessages, sendMessage, syncLegacyMessages, requireConversationParticipant };
