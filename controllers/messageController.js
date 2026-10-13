@@ -51,7 +51,7 @@ const getContacts = async (req, res, next) => {
       requester.toString() === req.user._id.toString() ? recipient : requester
     ));
     const contacts = await User.find({ _id: { $in: ids } })
-      .select('name headline profilePicture +encryptionPublicKey +encryptionSigningPublicKey encryptionKeyVersion')
+      .select('name headline profilePicture isVerifiedAccount verificationBadgeColor +encryptionPublicKey +encryptionSigningPublicKey encryptionKeyVersion')
       .lean();
 
     res.set('Cache-Control', 'private, no-store');
@@ -162,7 +162,7 @@ const listConversations = async (req, res, next) => {
   try {
     const conversations = await Conversation.find({ participants: req.user._id })
       .sort({ lastMessageAt: -1 })
-      .populate('participants', 'name headline profilePicture');
+      .populate('participants', 'name headline profilePicture isVerifiedAccount verificationBadgeColor');
     const conversationsWithPeers = conversations.map((conversation) => ({
       conversation,
       peer: conversation.participants.find((participant) => participant._id.toString() !== req.user._id.toString())
@@ -226,7 +226,7 @@ const openConversation = async (req, res, next) => {
     }
     const [accepted, peer] = await Promise.all([
       hasAcceptedConnection(req.user._id, peerId),
-      User.findById(peerId).select('name headline profilePicture +encryptionPublicKey +encryptionSigningPublicKey encryptionKeyVersion')
+      User.findById(peerId).select('name headline profilePicture isVerifiedAccount verificationBadgeColor +encryptionPublicKey +encryptionSigningPublicKey encryptionKeyVersion')
     ]);
     if (!accepted) {
       return res.status(403).json({ success: false, message: 'Messages are only available between accepted connections.' });

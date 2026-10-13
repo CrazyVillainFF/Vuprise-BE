@@ -63,7 +63,7 @@ const createPost = async (req, res, next) => {
     created = true;
 
     const populatedPost = await Post.findById(post._id)
-      .populate('author', 'name headline profilePicture company jobTitle location');
+      .populate('author', 'name headline profilePicture company jobTitle location isVerifiedAccount verificationBadgeColor');
 
     const postObj = populatedPost.toObject();
     postObj.isLiked = false;
@@ -103,7 +103,7 @@ const getFeed = async (req, res, next) => {
 
     const total = await Post.countDocuments(query);
     const posts = await Post.find(query)
-      .populate('author', 'name headline profilePicture company jobTitle location')
+      .populate('author', 'name headline profilePicture company jobTitle location isVerifiedAccount verificationBadgeColor')
       .populate({
         path: 'comments',
         populate: {
@@ -157,7 +157,7 @@ const getUserPosts = async (req, res, next) => {
     const total = await Post.countDocuments(query);
 
     const posts = await Post.find(query)
-      .populate('author', 'name headline profilePicture company jobTitle location')
+      .populate('author', 'name headline profilePicture company jobTitle location isVerifiedAccount verificationBadgeColor')
       .populate({
         path: 'comments',
         populate: {
@@ -197,7 +197,7 @@ const getUserPosts = async (req, res, next) => {
 const getPostById = async (req, res, next) => {
   try {
     const post = await Post.findById(req.params.id)
-      .populate('author', 'name headline profilePicture company jobTitle location')
+      .populate('author', 'name headline profilePicture company jobTitle location isVerifiedAccount verificationBadgeColor')
       .populate({
         path: 'comments',
         populate: {
@@ -296,7 +296,7 @@ const updatePost = async (req, res, next) => {
     if (nextMedia || req.body.removeMedia === 'true') await removePostMedia(previousMedia).catch((cleanupError) => console.error('[Post media cleanup]', cleanupError.message));
 
     const updated = await Post.findById(post._id)
-      .populate('author', 'name headline profilePicture company jobTitle location');
+      .populate('author', 'name headline profilePicture company jobTitle location isVerifiedAccount verificationBadgeColor');
 
     const pObj = updated.toObject();
     delete pObj.videoSourceUrl;
