@@ -2,14 +2,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const Group = require('../models/Group');
 const GroupMessage = require('../models/GroupMessage');
-const { getMessages, sendMessage, deleteMessage } = require('../controllers/groupMessageController');
+const { getMessages, sendMessage, deleteMessage, toggleMessageReaction } = require('../controllers/groupMessageController');
 
 const original = {};
 for (const [object, key] of [[Group, 'findOne'], [Group, 'updateOne'], [GroupMessage, 'create'], [GroupMessage, 'findOne'], [GroupMessage, 'find'], [GroupMessage, 'updateOne']]) original[`${object.modelName}.${key}`] = object[key];
 const restore = () => {
   for (const [object, key] of [[Group, 'findOne'], [Group, 'updateOne'], [GroupMessage, 'create'], [GroupMessage, 'findOne'], [GroupMessage, 'find'], [GroupMessage, 'updateOne']]) object[key] = original[`${object.modelName}.${key}`];
 };
-const response = () => ({ statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; }, set() {} });
+const response = () => ({ statusCode: 200, body: null, headers: {}, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; }, set(name, value) { this.headers[name] = value; return this; } });
 
 test('non-members cannot list messages or create persistent messages', async () => {
   Group.findOne = () => ({ select: async () => null });
@@ -99,5 +99,28 @@ test('group message deletion supports per-user hiding and restricts delete-for-e
     await deleteMessage(req, deniedRes, (error) => { throw error; });
     assert.equal(deniedRes.statusCode, 403);
     assert.equal(message.deletedForEveryone, undefined);
+  } finally { restore(); }
+});
+
+test('group members can toggle a supported emoji reaction on an active message', async () => {
+  const group = { _id: '507f1f77bcf86cd799439011' };
+  const userId = '507f1f77bcf86cd799439012';
+  const message = { _id: '507f1f77bcf86cd799439013', reactions: [], save: async () => {} };
+  GroupMessage.findOne = async (filter) => {
+    assert.equal(filter.group, group._id);
+    assert.equal(filter._id, message._id);
+    return message;
+  };
+  const res = response();
+  try {
+    await toggleMessageReaction({
+      authorizedGroup: group,
+      params: { id: group._id, messageId: message._id },
+      user: { _id: userId },
+      body: { emoji: '❤️' },
+    }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['Cache-Control'], 'private, no-store');
+    assert.deepEqual(res.body.reactions.map(({ user, emoji }) => ({ user, emoji })), [{ user: userId, emoji: '❤️' }]);
   } finally { restore(); }
 });

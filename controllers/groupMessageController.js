@@ -168,6 +168,7 @@ const toggleMessageReaction = async (req, res, next) => {
     if (!message) return fail(res, 404, 'Message not found.');
     toggleReaction(message, req.user._id, emoji);
     await message.save();
+    res.set('Cache-Control', 'private, no-store');
     res.json({ success: true, reactions: message.reactions });
   } catch (error) { next(error); }
 };
