@@ -5,7 +5,7 @@ const User = require('../models/User');
 const fs = require('fs/promises');
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
 const { canViewUserPosts, isBlockedBy, postVisibilityFilter, addPostVisibility } = require('../utils/postVisibility');
-const { normalizePostReaction, togglePostReaction } = require('../utils/postReactions');
+const { normalizePostReaction, togglePostReaction: togglePostReactionState } = require('../utils/postReactions');
 
 const savePostMedia = async (file, req, body = {}) => {
   if (!file) return null;
@@ -441,7 +441,7 @@ const togglePostReaction = async (req, res, next) => {
     const emoji = normalizePostReaction(req.body?.emoji);
     if (!emoji) return res.status(400).json({ success: false, message: 'Choose one of the supported post reactions.' });
 
-    post.reactions = togglePostReaction(post.reactions, req.user._id, emoji);
+    post.reactions = togglePostReactionState(post.reactions, req.user._id, emoji);
     await post.save();
 
     const formatted = formatPostReactions(post, req.user._id);
