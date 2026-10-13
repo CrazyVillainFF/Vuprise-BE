@@ -7,7 +7,8 @@ const {
   getPostById,
   updatePost,
   deletePost,
-  toggleLikePost
+  toggleLikePost,
+  togglePostReaction
 } = require('../controllers/postController');
 const { protect, optionalAuth } = require('../middleware/authMiddleware');
 const { postUpload, preparePostUpload, validateImageContent } = require('../middleware/uploadMiddleware');
@@ -22,5 +23,6 @@ router.get('/:id', optionalAuth, getPostById);
 router.put('/:id', protect, postUpload.single('image'), preparePostUpload, validateImageContent, updatePost);
 router.delete('/:id', protect, deletePost);
 router.post('/:id/like', protect, toggleLikePost);
+router.put('/:id/reactions', protect, togglePostReaction);
 
 module.exports = router;
