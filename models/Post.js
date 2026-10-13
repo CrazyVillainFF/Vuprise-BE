@@ -1,5 +1,10 @@
 const mongoose = require('mongoose');
 
+const PostReactionSchema = new mongoose.Schema({
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  emoji: { type: String, required: true, maxlength: 8 }
+}, { _id: false });
+
 const PostSchema = new mongoose.Schema({
   author: {
     type: mongoose.Schema.Types.ObjectId,
@@ -32,6 +37,7 @@ const PostSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }],
+  reactions: { type: [PostReactionSchema], default: [] },
   comments: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Comment'
