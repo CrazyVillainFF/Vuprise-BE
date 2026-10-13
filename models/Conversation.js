@@ -8,6 +8,9 @@ const ConversationSchema = new mongoose.Schema({
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     name: { type: String, maxlength: 80, trim: true }
   }],
+  isOfficialBroadcast: { type: Boolean, default: false, index: true },
+  officialSender: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  officialRecipient: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   lastMessageAt: { type: Date, default: Date.now, index: true }
 }, { timestamps: true });
 

@@ -111,6 +111,75 @@ const setVerification = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+const broadcastMessage = async (req, res, next) => {
+  try {
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    const selectAll = req.body?.selectAll === true;
+    const recipientIds = req.body?.recipientIds;
+    if (!text || text.length > 5000) return fail(res, 400, 'Enter a message from 1 to 5000 characters.');
+    if (selectAll && Array.isArray(recipientIds) && recipientIds.length) return fail(res, 400, 'Choose all users or selected users, not both.');
+    if (!selectAll && (!Array.isArray(recipientIds) || recipientIds.length < 1 || recipientIds.length > 10000 || recipientIds.some((id) => !validId(id)))) {
+      return fail(res, 400, 'Select between 1 and 10,000 valid recipient accounts, or choose all users.');
+    }
+
+    const recipients = await User.find(selectAll
+      ? { _id: { $ne: req.user._id }, moderationStatus: { $ne: 'deleted' } }
+      : { _id: { $in: [...new Set(recipientIds.map(String))], $ne: req.user._id }, moderationStatus: { $ne: 'deleted' } }
+    ).select('_id').lean();
+    if (!selectAll && recipients.length !== new Set(recipientIds.map(String).filter((id) => id !== String(req.user._id))).size) {
+      return fail(res, 404, 'One or more selected accounts no longer exist. Refresh the user list and try again.');
+    }
+    if (!recipients.length) return fail(res, 400, 'There are no eligible recipient accounts.');
+    if (recipients.length > 10000) return fail(res, 413, 'This all-user message exceeds the current 10,000-recipient limit.');
+
+    const sentAt = new Date();
+    const recipientObjectIds = recipients.map(({ _id }) => _id);
+    const pairKeys = recipientObjectIds.map((id) => `official:${id}`);
+    const upserts = recipients.map(({ _id }) => ({
+      updateOne: {
+        filter: { pairKey: `official:${_id}` },
+        update: {
+          $setOnInsert: { pairKey: `official:${_id}`, participants: [req.user._id, _id], isOfficialBroadcast: true, officialSender: req.user._id, officialRecipient: _id },
+          $set: { lastMessageAt: sentAt },
+          $pull: { hiddenFor: _id }
+        },
+        upsert: true
+      }
+    }));
+    for (let offset = 0; offset < upserts.length; offset += 500) {
+      await Conversation.bulkWrite(upserts.slice(offset, offset + 500), { ordered: true });
+    }
+    const threads = await Conversation.find({ pairKey: { $in: pairKeys }, isOfficialBroadcast: true }).select('_id officialRecipient officialSender').lean();
+    const threadByRecipient = new Map(threads.map((thread) => [String(thread.officialRecipient), thread]));
+    const messages = recipients.map(({ _id }) => ({
+      conversation: threadByRecipient.get(String(_id))?._id,
+      sender: threadByRecipient.get(String(_id))?.officialSender,
+      text,
+      readBy: [threadByRecipient.get(String(_id))?.officialSender],
+      createdAt: sentAt,
+      updatedAt: sentAt
+    }));
+    if (messages.some((message) => !message.conversation)) return fail(res, 500, 'The official message inbox could not be prepared. Please try again.');
+    for (let offset = 0; offset < messages.length; offset += 500) {
+      await DirectMessage.insertMany(messages.slice(offset, offset + 500));
+    }
+    await Conversation.updateMany({ _id: { $in: threads.map(({ _id }) => _id) } }, { $set: { lastMessageAt: sentAt } });
+    const officialNotifications = recipients.map(({ _id }) => ({
+      recipient: _id,
+      sender: threadByRecipient.get(String(_id)).officialSender,
+      type: 'official_message',
+      conversation: threadByRecipient.get(String(_id))._id,
+      message: 'Vuprise sent you an official message.',
+      read: false
+    }));
+    for (let offset = 0; offset < officialNotifications.length; offset += 500) {
+      await Notification.insertMany(officialNotifications.slice(offset, offset + 500));
+    }
+    await logAction(req, null, 'broadcast_message', '', null, null, `${recipients.length} recipient(s)`);
+    res.status(201).json({ success: true, recipientCount: recipients.length, message: `Official Vuprise message sent to ${recipients.length} ${recipients.length === 1 ? 'user' : 'users'}.` });
+  } catch (error) { next(error); }
+};
+
 const findTarget = async (req, res) => {
   if (!validId(req.params.id)) { fail(res, 400, 'Invalid user ID.'); return null; }
   const user = await User.findById(req.params.id).select('+moderationStatus +moderationExpiresAt +moderationReason +moderationWarnings');
@@ -346,4 +415,4 @@ const updateInboxItem = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { overview, listUsers, userDetail, userPosts, setVerification, temporaryBan, permanentBan, liftBan, addWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };
+module.exports = { overview, listUsers, userDetail, userPosts, setVerification, broadcastMessage, temporaryBan, permanentBan, liftBan, addWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };

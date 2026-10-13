@@ -9,6 +9,7 @@ const { normalizeDirectMessagePayload } = require('../utils/directMessagePayload
 const { normalizeReaction, toggleReaction } = require('../utils/messageReactions');
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
 const fs = require('fs/promises');
+const { isAdminEmail } = require('../utils/adminAccess');
 
 const hasAcceptedConnection = async (userId, peerId) => Boolean(await Connection.exists({
   status: 'accepted',
@@ -26,6 +27,12 @@ const getAuthorizedConversation = async (conversationId, userId) => {
   if (!mongoose.isValidObjectId(conversationId)) return null;
   const conversation = await Conversation.findOne({ _id: conversationId, participants: userId });
   if (!conversation) return null;
+  if (conversation.isOfficialBroadcast) {
+    const isRecipient = String(conversation.officialRecipient) === String(userId);
+    const isAdministrator = await User.findById(userId).select('email').lean().then((user) => isAdminEmail(user?.email));
+    if (!isRecipient && !isAdministrator) return null;
+    return { conversation, peerId: isRecipient ? conversation.officialSender : conversation.officialRecipient };
+  }
   const peerId = conversation.participants.find((participant) => participant.toString() !== userId.toString());
   if (!peerId || !(await hasAcceptedConnection(userId, peerId))) return null;
   return { conversation, peerId };
@@ -165,8 +172,11 @@ const listConversations = async (req, res, next) => {
       .populate('participants', 'name headline profilePicture isVerifiedAccount verificationBadgeColor');
     const conversationsWithPeers = conversations.map((conversation) => ({
       conversation,
-      peer: conversation.participants.find((participant) => participant._id.toString() !== req.user._id.toString())
-    })).filter(({ peer }) => Boolean(peer));
+      peer: conversation.isOfficialBroadcast && String(conversation.officialRecipient) === String(req.user._id)
+        ? { _id: conversation.officialSender, name: 'Vuprise', headline: 'Official Vuprise messages', isVerifiedAccount: true, verificationBadgeColor: 'gold' }
+        : conversation.participants.find((participant) => participant._id.toString() !== req.user._id.toString()),
+      isOfficialBroadcast: Boolean(conversation.isOfficialBroadcast)
+    })).filter(({ peer, conversation, isOfficialBroadcast }) => Boolean(peer) && !conversation.hiddenFor.some((userId) => userId.toString() === req.user._id.toString()) && (!isOfficialBroadcast || String(conversation.officialRecipient) === String(req.user._id)));
     const peerIds = conversationsWithPeers.map(({ peer }) => peer._id);
     const acceptedConnections = peerIds.length ? await Connection.find({
       status: 'accepted',
@@ -178,8 +188,8 @@ const listConversations = async (req, res, next) => {
     const acceptedPeerIds = new Set(acceptedConnections.map(({ requester, recipient }) => (
       requester.toString() === req.user._id.toString() ? recipient.toString() : requester.toString()
     )));
-    const visibleConversations = conversationsWithPeers.filter(({ conversation, peer }) => (
-      acceptedPeerIds.has(peer._id.toString()) &&
+    const visibleConversations = conversationsWithPeers.filter(({ conversation, peer, isOfficialBroadcast }) => (
+      (isOfficialBroadcast || acceptedPeerIds.has(peer._id.toString())) &&
       !conversation.hiddenFor.some((userId) => userId.toString() === req.user._id.toString())
     ));
     const visibleConversationIds = visibleConversations.map(({ conversation }) => conversation._id);
@@ -205,6 +215,8 @@ const listConversations = async (req, res, next) => {
     const visible = visibleConversations.map(({ conversation, peer }) => ({
       _id: conversation._id,
       peer,
+      isOfficialBroadcast: Boolean(conversation.isOfficialBroadcast),
+      readOnly: Boolean(conversation.isOfficialBroadcast),
       displayName: conversation.displayNames.find(({ user }) => user.toString() === req.user._id.toString())?.name || '',
       lastMessageAt: conversation.lastMessageAt,
       lastMessage: (() => {
@@ -387,6 +399,9 @@ const sendMessage = async (req, res, next) => {
   try {
     const authorized = req.authorizedConversation || await getAuthorizedConversation(req.params.conversationId, req.user._id);
     if (!authorized) return res.status(404).json({ success: false, message: 'Conversation not found or no longer available.' });
+    if (authorized.conversation.isOfficialBroadcast && (!isAdminEmail(req.user.email) || String(authorized.conversation.officialSender) !== String(req.user._id))) {
+      return res.status(403).json({ success: false, message: 'Only Vuprise administrators can send messages in this official inbox.' });
+    }
 
     if (req.file) {
       const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
