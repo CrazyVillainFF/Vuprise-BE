@@ -23,7 +23,11 @@ const overview = async (_req, res, next) => {
       User.countDocuments({ moderationStatus: { $ne: 'deleted' } }),
       User.countDocuments({ $or: [{ moderationStatus: 'permanent_ban' }, { moderationStatus: 'temporary_ban', $or: [{ moderationExpiresAt: null }, { moderationExpiresAt: { $gt: new Date() } }] }] }),
       SupportRequest.countDocuments({ type: { $in: ['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry'] }, status: { $in: ['pending', 'under_review'] } }),
-      SupportRequest.countDocuments({ type: 'report', status: { $in: ['pending', 'under_review'] } }),
+      SupportRequest.countDocuments({
+        type: 'report',
+        status: { $in: ['pending', 'under_review'] },
+        $or: [{ status: 'under_review' }, { status: 'pending', $or: [{ replySentAt: { $exists: false } }, { replySentAt: null }] }]
+      }),
       SupportRequest.countDocuments({ type: { $in: ['general_help', 'other'] }, status: { $in: ['pending', 'under_review'] } })
     ]);
     res.json({ success: true, overview: { totalUsers, activeBans, pendingRequests, unresolvedReports, openHelp } });
@@ -242,12 +246,23 @@ const listInbox = (type) => async (req, res, next) => {
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
     const filter = { type: Array.isArray(type) ? { $in: type } : type };
-    if (['pending', 'under_review', 'approved', 'rejected'].includes(req.query.status)) filter.status = req.query.status;
+    if (type === 'report' && req.query.status === 'pending') {
+      filter.$and = [
+        { status: 'pending' },
+        { $or: [{ replySentAt: { $exists: false } }, { replySentAt: null }] }
+      ];
+    } else if (type === 'report' && req.query.status === 'resolved') {
+      filter.$or = [
+        { status: 'resolved' },
+        { status: 'pending', replySentAt: { $exists: true, $ne: null } }
+      ];
+    } else if (['pending', 'under_review', 'approved', 'rejected', 'resolved'].includes(req.query.status)) filter.status = req.query.status;
     const [requests, total] = await Promise.all([
       SupportRequest.find(filter).select('-__v').populate('user', 'name email moderationStatus moderationExpiresAt moderationReason').populate('reportedUser', 'name email moderationStatus moderationExpiresAt').populate('reportedPost', 'author content image mediaType videoUrl createdAt').populate({ path: 'reportedMessage', select: '_id sender createdAt' }).populate('adminNotes.admin', 'name email').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
       SupportRequest.countDocuments(filter)
     ]);
-    res.json({ success: true, requests, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+    const normalizedRequests = type === 'report' ? requests.map((request) => request.status === 'pending' && request.replySentAt ? { ...request, status: 'resolved' } : request) : requests;
+    res.json({ success: true, requests: normalizedRequests, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
   } catch (error) { next(error); }
 };
 
@@ -258,7 +273,7 @@ const updateInboxItem = async (req, res, next) => {
     if (!item) return fail(res, 404, 'Request not found.');
     const { status, priority, note, resolution, outcome } = req.body || {};
     if (status !== undefined) {
-      if (!['pending', 'under_review', 'approved', 'rejected'].includes(status)) return fail(res, 400, 'Invalid request status.');
+      if (!['pending', 'under_review', 'approved', 'rejected', 'resolved'].includes(status)) return fail(res, 400, 'Invalid request status.');
       item.status = status;
     }
     if (priority !== undefined) {
@@ -275,6 +290,9 @@ const updateInboxItem = async (req, res, next) => {
       if (typeof resolution !== 'string' || resolution.length > 2000) return fail(res, 400, 'Resolution must be at most 2000 characters.');
       item.resolution = replyText;
     }
+    // Saving a report review completes it by default. Admins who need more
+    // investigation must explicitly select Under review to keep it counted.
+    if (item.type === 'report' && item.status === 'pending') item.status = 'resolved';
     item.resolvedAt = item.status === 'pending' || item.status === 'under_review' ? null : new Date();
     if (item.type.endsWith('_appeal') && item.status === 'approved') {
       if (!['lift_temporary_ban', 'lift_permanent_ban', 'reply_only'].includes(outcome)) return fail(res, 400, 'Select an explicit appeal outcome.');
@@ -295,6 +313,10 @@ const updateInboxItem = async (req, res, next) => {
     const reply = shouldSendReply ? await sendSupportReply(item.email, replyText) : null;
     if (reply?.sent) {
       item.replySentAt = new Date();
+      if (item.type === 'report' && item.status === 'pending') {
+        item.status = 'resolved';
+        item.resolvedAt = item.replySentAt;
+      }
       await item.save();
     }
     res.json({ success: true, request: item, ...(reply && { reply }) });

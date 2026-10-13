@@ -21,7 +21,7 @@ const SupportRequestSchema = new mongoose.Schema({
   reportedThread: { type: mongoose.Schema.Types.ObjectId, refPath: 'reportedThreadModel', default: null },
   reportedThreadModel: { type: String, enum: ['Conversation', 'Group'], default: undefined },
   evidenceUrls: [{ type: String, maxlength: 2048 }],
-  status: { type: String, enum: ['pending', 'under_review', 'approved', 'rejected'], default: 'pending', index: true },
+  status: { type: String, enum: ['pending', 'under_review', 'approved', 'rejected', 'resolved'], default: 'pending', index: true },
   priority: { type: String, enum: ['low', 'normal', 'high', 'urgent'], default: 'normal', index: true },
   adminNotes: { type: [SupportNoteSchema], default: [] },
   resolution: { type: String, trim: true, maxlength: 2000, default: '' },

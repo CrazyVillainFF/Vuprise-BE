@@ -148,6 +148,10 @@ const UserSchema = new mongoose.Schema({
     default: null,
     select: false
   },
+  inactivityRemindersEnabled: { type: Boolean, default: true, select: false },
+  inactivityReminderSentAt: { type: Date, default: null, select: false },
+  inactivityReminderClaimedAt: { type: Date, default: null, select: false },
+  inactivityReminderProviderId: { type: String, default: '', select: false, maxlength: 200 },
   encryptionPublicKey: {
     type: String,
     default: '',
@@ -215,5 +219,6 @@ UserSchema.methods.matchPassword = async function (enteredPassword) {
 
 // Text index for search
 UserSchema.index({ name: 'text', headline: 'text', company: 'text', skills: 'text', location: 'text' });
+UserSchema.index({ lastSeenAt: 1, inactivityRemindersEnabled: 1, moderationStatus: 1 });
 
 module.exports = mongoose.model('User', UserSchema);

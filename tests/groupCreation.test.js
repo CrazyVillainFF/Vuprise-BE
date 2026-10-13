@@ -83,3 +83,23 @@ test('group creation stores invitations and sends a notification to each selecte
   assert.deepEqual(notifications.map(({ recipient, type, group: groupId }) => ({ recipient, type, groupId })), invitees.map((recipient) => ({ recipient, type: 'group_invitation', groupId: group._id })));
 });
 
+test('group creation accepts one multipart invitee supplied as a scalar field', async () => {
+  const owner = '507f1f77bcf86cd799439011';
+  const invitee = '507f1f77bcf86cd799439012';
+  const group = { _id: '507f1f77bcf86cd799439014' };
+  let groupInput;
+  User.find = () => ({ select: async () => [{ _id: invitee }] });
+  Connection.exists = async () => ({ _id: 'accepted-connection' });
+  Group.create = async (data) => { groupInput = data; return group; };
+  Notification.insertMany = async () => {};
+  const res = response();
+
+  await createGroup({
+    body: { name: 'Design circle', about: 'Welcome Everyone', memberIds: invitee },
+    user: { _id: owner, name: 'Vishnu' },
+  }, res, (error) => { throw error; });
+
+  assert.equal(res.statusCode, 201);
+  assert.deepEqual(groupInput.invitations.map(({ user, status }) => ({ user, status })), [{ user: invitee, status: 'pending' }]);
+});
+

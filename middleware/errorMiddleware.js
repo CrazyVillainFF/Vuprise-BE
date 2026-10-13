@@ -31,9 +31,16 @@ const errorHandler = (err, req, res, next) => {
   // Multer errors
   if (err.code === 'LIMIT_FILE_SIZE') {
     statusCode = 413;
-    message = 'The uploaded image is too large. Images are limited to 10MB; publish videos through the direct video upload flow.';
+    message = req.originalUrl?.startsWith('/api/support/')
+      ? 'Each evidence photo must be 5 MB or smaller.'
+      : 'The uploaded image is too large. Images are limited to 10MB; publish videos through the direct video upload flow.';
   }
-  if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') { statusCode = 400; message = 'Upload one image per post. Videos use the secure direct-upload flow.'; }
+  if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') {
+    statusCode = 400;
+    message = req.originalUrl?.startsWith('/api/support/')
+      ? 'Attach up to 5 evidence photos.'
+      : 'Upload one image per post. Videos use the secure direct-upload flow.';
+  }
 
   console.error(`[Error ${statusCode}] ${req.method} ${req.originalUrl}:`, err.message);
 

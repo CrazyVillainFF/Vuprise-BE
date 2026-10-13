@@ -414,9 +414,9 @@ const searchUsers = async (req, res, next) => {
 // @access  Private
 const updateSettings = async (req, res, next) => {
   try {
-    const { themePreference, privateAccount, hideActivity } = req.body;
+    const { themePreference, privateAccount, hideActivity, inactivityRemindersEnabled } = req.body;
 
-    const user = await User.findById(req.user._id).select('+hideActivity');
+    const user = await User.findById(req.user._id).select('+hideActivity +inactivityRemindersEnabled');
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
@@ -436,6 +436,13 @@ const updateSettings = async (req, res, next) => {
       }
       user.hideActivity = hideActivity;
     }
+    if (inactivityRemindersEnabled !== undefined) {
+      if (typeof inactivityRemindersEnabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'Inactivity reminders must be enabled or disabled.' });
+      }
+      user.inactivityRemindersEnabled = inactivityRemindersEnabled;
+      if (!inactivityRemindersEnabled) user.inactivityReminderClaimedAt = null;
+    }
 
     await user.save();
     if (hideActivity !== undefined) require('../realtime/presenceHub').setHidden(user._id, hideActivity);
@@ -447,7 +454,8 @@ const updateSettings = async (req, res, next) => {
         _id: user._id,
         themePreference: user.themePreference,
         privateAccount: user.privateAccount,
-        hideActivity: user.hideActivity
+        hideActivity: user.hideActivity,
+        inactivityRemindersEnabled: user.inactivityRemindersEnabled
       }
     });
   } catch (error) {

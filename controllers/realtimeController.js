@@ -23,19 +23,22 @@ exports.events = async (req, res, next) => {
     clearInterval(keepAlive);
     if (hub.removeSession(session) && hub.getSessionCount(session.userId) === 0) {
       const lastSeenAt = new Date();
-      User.updateOne({ _id: session.userId }, { $set: { lastSeenAt } }).then(() => hub.setLastSeen(session.userId, lastSeenAt)).catch(() => {});
+      User.updateOne({ _id: session.userId }, { $set: { lastSeenAt }, $unset: { inactivityReminderClaimedAt: 1 } }).then(() => hub.setLastSeen(session.userId, lastSeenAt)).catch(() => {});
     }
   });
   } catch (error) { next(error); }
 };
 
-exports.heartbeat = (req, res) => {
+exports.heartbeat = async (req, res, next) => {
+  try {
   if (!hub.heartbeat(req.user._id, req.body.sessionId)) return fail(res, 401, 'Realtime session expired. Reconnect to continue.');
   if (hub.shouldPersistLastSeen(req.user._id)) {
     const lastSeenAt = new Date();
-    User.updateOne({ _id: req.user._id }, { $set: { lastSeenAt } }).then(() => hub.setLastSeen(req.user._id, lastSeenAt)).catch(() => {});
+    await User.updateOne({ _id: req.user._id }, { $set: { lastSeenAt }, $unset: { inactivityReminderClaimedAt: 1 } });
+    hub.setLastSeen(req.user._id, lastSeenAt);
   }
   res.json({ success: true, timestamp: Date.now() });
+  } catch (error) { next(error); }
 };
 
 const getVisiblePresenceIds = async (viewerId, targetIds) => {
@@ -73,7 +76,7 @@ exports.logout = async (req, res, next) => {
   if (!session || session.userId !== String(req.user._id)) return fail(res, 404, 'Realtime session not found.');
   if (hub.removeSession(session) && hub.getSessionCount(session.userId) === 0) {
     const lastSeenAt = new Date();
-    await User.updateOne({ _id: session.userId }, { $set: { lastSeenAt } });
+    await User.updateOne({ _id: session.userId }, { $set: { lastSeenAt }, $unset: { inactivityReminderClaimedAt: 1 } });
     hub.setLastSeen(session.userId, lastSeenAt);
   }
   res.json({ success: true });

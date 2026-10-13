@@ -30,3 +30,21 @@ services:
         sync: false
       - key: CLOUDINARY_API_SECRET
         sync: false
+  - type: cron
+    name: vuprise-inactivity-reminders
+    env: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node scripts/sendInactivityReminders.js
+    schedule: "*/30 * * * *"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGO_URI
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: PASSWORD_RESET_FROM
+        value: vupriseofficial@gmail.com
+      - key: CLIENT_URL
+        value: https://nexora-lac-three.vercel.app

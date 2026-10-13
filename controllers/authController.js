@@ -120,7 +120,7 @@ const login = async (req, res, next) => {
     }
 
     // Check user exists with password field selected
-    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password +hideActivity +moderationStatus +moderationExpiresAt +moderationReason +moderationWarnings');
+    const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password +hideActivity +inactivityRemindersEnabled +moderationStatus +moderationExpiresAt +moderationReason +moderationWarnings');
 
     if (!user) {
       return res.status(401).json({
@@ -174,7 +174,7 @@ const login = async (req, res, next) => {
 // @access  Private
 const getMe = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('+hideActivity +moderationWarnings')
+    const user = await User.findById(req.user._id).select('+hideActivity +inactivityRemindersEnabled +moderationWarnings')
       .populate('connections', 'name headline profilePicture company jobTitle')
       .populate('followers', 'name headline profilePicture')
       .populate('following', 'name headline profilePicture');

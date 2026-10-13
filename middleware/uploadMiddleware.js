@@ -28,30 +28,35 @@ const fileFilter = (req, file, cb) => {
   if (allowedMimeTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Only image files (JPEG, PNG, WEBP, GIF) are allowed.'), false);
+    const error = new Error('Only image files (JPEG, PNG, WEBP, GIF) are allowed.');
+    error.statusCode = 415;
+    cb(error, false);
   }
 };
 
 const validateImageContent = (req, res, next) => {
-  if (!req.file) return next();
-  if (req.file.mimetype?.startsWith('video/')) return next();
-  let valid = false;
-  try {
-    const signature = Buffer.alloc(12);
-    const descriptor = fs.openSync(req.file.path, 'r');
-    try { fs.readSync(descriptor, signature, 0, signature.length, 0); }
-    finally { fs.closeSync(descriptor); }
-    const bytes = [...signature];
-    const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-    const isPng = signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    const isGif = signature.subarray(0, 6).toString('ascii').match(/^GIF8[79]a$/);
-    const isWebp = signature.subarray(0, 4).toString('ascii') === 'RIFF' && signature.subarray(8, 12).toString('ascii') === 'WEBP';
-    valid = isJpeg || isPng || isGif || isWebp;
-  } catch { valid = false; }
+  const files = [...(req.files || []), ...(req.file ? [req.file] : [])];
+  if (!files.length) return next();
+  for (const file of files) {
+    if (file.mimetype?.startsWith('video/')) continue;
+    let valid = false;
+    try {
+      const signature = Buffer.alloc(12);
+      const descriptor = fs.openSync(file.path, 'r');
+      try { fs.readSync(descriptor, signature, 0, signature.length, 0); }
+      finally { fs.closeSync(descriptor); }
+      const bytes = [...signature];
+      const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+      const isPng = signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+      const isGif = signature.subarray(0, 6).toString('ascii').match(/^GIF8[79]a$/);
+      const isWebp = signature.subarray(0, 4).toString('ascii') === 'RIFF' && signature.subarray(8, 12).toString('ascii') === 'WEBP';
+      valid = isJpeg || isPng || isGif || isWebp;
+    } catch { valid = false; }
 
-  if (!valid) {
-    fs.unlink(req.file.path, () => {});
-    return res.status(400).json({ success: false, message: 'The uploaded file is not a valid JPEG, PNG, WEBP, or GIF image.' });
+    if (!valid) {
+      files.forEach((uploaded) => fs.unlink(uploaded.path, () => {}));
+      return res.status(400).json({ success: false, message: 'The uploaded file is not a valid JPEG, PNG, WEBP, or GIF image.' });
+    }
   }
   return next();
 };
@@ -59,6 +64,12 @@ const validateImageContent = (req, res, next) => {
 const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter
+});
+
+const supportUpload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024, files: 5 },
   fileFilter
 });
 
@@ -157,4 +168,4 @@ const deleteUploadedMedia = async ({ publicId, url, resourceType = 'image' } = {
   }
 };
 
-module.exports = { upload, postUpload, preparePostUpload, processUploadedFile, processUploadedMedia, deleteUploadedMedia, validateImageContent };
+module.exports = { upload, supportUpload, postUpload, preparePostUpload, processUploadedFile, processUploadedMedia, deleteUploadedMedia, validateImageContent };

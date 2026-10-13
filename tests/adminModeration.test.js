@@ -2,11 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const User = require('../models/User');
 const SupportRequest = require('../models/SupportRequest');
+const AdminAuditLog = require('../models/AdminAuditLog');
 const { isAdminEmail } = require('../utils/adminAccess');
 const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { createRequest, consumeRateLimit } = require('../controllers/supportController');
-const { sendSupportReply } = require('../controllers/adminController');
+const { overview, listReports, sendSupportReply, updateInboxItem } = require('../controllers/adminController');
 const { listUsers } = require('../controllers/adminController');
 const jwt = require('jsonwebtoken');
 const { protect } = require('../middleware/authMiddleware');
@@ -141,5 +142,123 @@ test('support replies accurately report Brevo acceptance and rejection without l
     global.fetch = originalFetch;
     if (oldKey === undefined) delete process.env.BREVO_API_KEY; else process.env.BREVO_API_KEY = oldKey;
     if (oldSender === undefined) delete process.env.PASSWORD_RESET_FROM; else process.env.PASSWORD_RESET_FROM = oldSender;
+  }
+});
+
+test('saving a pending report with an already accepted reply marks it resolved', async () => {
+  const originalFindById = SupportRequest.findById;
+  const originalCreate = AdminAuditLog.create;
+  const report = {
+    _id: '507f1f77bcf86cd799439099',
+    type: 'report',
+    email: 'reporter@example.com',
+    status: 'pending',
+    priority: 'normal',
+    resolution: 'We reviewed your report.',
+    replySentAt: new Date('2026-10-12T14:44:00.000Z'),
+    save: async function save() { this.saved = true; }
+  };
+  SupportRequest.findById = async () => report;
+  AdminAuditLog.create = async () => ({ });
+  try {
+    const res = response();
+    await updateInboxItem({ params: { id: report._id }, body: { status: 'pending' }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(report.status, 'resolved');
+    assert.ok(report.resolvedAt instanceof Date);
+    assert.equal(report.saved, true);
+  } finally {
+    SupportRequest.findById = originalFindById;
+    AdminAuditLog.create = originalCreate;
+  }
+});
+
+test('saving a report review as Pending resolves it by default so the unresolved count drops', async () => {
+  const originalFindById = SupportRequest.findById;
+  const originalCreate = AdminAuditLog.create;
+  const report = {
+    _id: '507f1f77bcf86cd799439097', type: 'report', email: 'reporter@example.com', status: 'pending', priority: 'normal',
+    message: 'Please review this post.', save: async function save() { this.saved = true; }
+  };
+  SupportRequest.findById = async () => report;
+  AdminAuditLog.create = async () => ({});
+  try {
+    const res = response();
+    await updateInboxItem({ params: { id: report._id }, body: { status: 'pending' }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(report.status, 'resolved');
+    assert.ok(report.resolvedAt instanceof Date);
+    assert.equal(report.saved, true);
+  } finally {
+    SupportRequest.findById = originalFindById;
+    AdminAuditLog.create = originalCreate;
+  }
+});
+
+test('saving an Approved report preserves the selected status and removes it from unresolved reports', async () => {
+  const originalFindById = SupportRequest.findById;
+  const originalCreate = AdminAuditLog.create;
+  const report = {
+    _id: '507f1f77bcf86cd799439096', type: 'report', email: 'reporter@example.com', status: 'pending', priority: 'normal',
+    message: 'Please review this post.', save: async function save() { this.saved = true; }
+  };
+  SupportRequest.findById = async () => report;
+  AdminAuditLog.create = async () => ({});
+  try {
+    const res = response();
+    await updateInboxItem({ params: { id: report._id }, body: { status: 'approved' }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(report.status, 'approved');
+    assert.ok(report.resolvedAt instanceof Date);
+    assert.equal(report.saved, true);
+  } finally {
+    SupportRequest.findById = originalFindById;
+    AdminAuditLog.create = originalCreate;
+  }
+});
+
+test('overview excludes reports with a successfully delivered reply from unresolved count', async () => {
+  const originalUserCount = User.countDocuments;
+  const originalSupportCount = SupportRequest.countDocuments;
+  const supportFilters = [];
+  User.countDocuments = async () => 0;
+  SupportRequest.countDocuments = async (filter) => { supportFilters.push(filter); return 0; };
+  try {
+    const res = response();
+    await overview({}, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    const reportFilter = supportFilters.find((filter) => filter.type === 'report');
+    assert.ok(reportFilter);
+    assert.deepEqual(reportFilter.$or[1].$or, [{ replySentAt: { $exists: false } }, { replySentAt: null }]);
+    assert.equal(res.body.overview.unresolvedReports, 0);
+  } finally {
+    User.countDocuments = originalUserCount;
+    SupportRequest.countDocuments = originalSupportCount;
+  }
+});
+
+test('reports with an accepted reply appear as resolved in the resolved filter', async () => {
+  const originalFind = SupportRequest.find;
+  const originalCount = SupportRequest.countDocuments;
+  const record = { _id: '507f1f77bcf86cd799439098', type: 'report', status: 'pending', replySentAt: new Date() };
+  let filter;
+  SupportRequest.find = (query) => {
+    filter = query;
+    const chain = {
+      select() { return this; }, populate() { return this; }, sort() { return this; },
+      skip() { return this; }, limit() { return this; }, lean() { return Promise.resolve([record]); }
+    };
+    return chain;
+  };
+  SupportRequest.countDocuments = async () => 1;
+  try {
+    const res = response();
+    await listReports({ query: { status: 'resolved' } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.requests[0].status, 'resolved');
+    assert.equal(filter.$or[1].status, 'pending');
+  } finally {
+    SupportRequest.find = originalFind;
+    SupportRequest.countDocuments = originalCount;
   }
 });
