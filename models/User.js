@@ -59,6 +59,7 @@ const UserSchema = new mongoose.Schema({
   },
   // Undefined preserves the legacy designated-account badge until an admin explicitly overrides it.
   isVerifiedAccount: { type: Boolean, default: undefined },
+  verificationBadgeColor: { type: String, enum: ['black', 'blue', 'gold'], default: 'blue' },
   password: {
     type: String,
     required: [true, 'Please provide a password'],

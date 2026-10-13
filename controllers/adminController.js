@@ -53,7 +53,7 @@ const listUsers = async (req, res, next) => {
       else filter.$or = clauses;
     }
     const [users, total] = await Promise.all([
-      User.find(filter).select('name email profilePicture headline company jobTitle createdAt updatedAt isVerifiedAccount moderationStatus moderationExpiresAt moderationReason').sort({ createdAt: -1, _id: 1 }).skip((page - 1) * limit).limit(limit).lean(),
+      User.find(filter).select('name email profilePicture headline company jobTitle createdAt updatedAt isVerifiedAccount verificationBadgeColor moderationStatus moderationExpiresAt moderationReason').sort({ createdAt: -1, _id: 1 }).skip((page - 1) * limit).limit(limit).lean(),
       User.countDocuments(filter)
     ]);
     res.json({ success: true, users: users.map((user) => ({ ...user, isVerifiedAccount: isVerifiedAccount(user), moderationStatus: user.moderationStatus || 'active' })), pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
@@ -95,13 +95,19 @@ const setVerification = async (req, res, next) => {
     if (!user) return;
     if (typeof req.body?.isVerifiedAccount !== 'boolean') return fail(res, 400, 'Choose whether this account should be verified.');
     const isVerifiedAccount = req.body.isVerifiedAccount;
+    const allowedBadgeColors = ['black', 'blue', 'gold'];
+    const verificationBadgeColor = req.body?.verificationBadgeColor ?? user.verificationBadgeColor ?? 'blue';
+    if (isVerifiedAccount && !allowedBadgeColors.includes(verificationBadgeColor)) return fail(res, 400, 'Choose black, blue, or gold for the verified badge.');
+    const update = isVerifiedAccount
+      ? { $set: { isVerifiedAccount, verificationBadgeColor } }
+      : { $set: { isVerifiedAccount } };
     const result = await User.updateOne(
       { _id: user._id, moderationStatus: { $ne: 'deleted' } },
-      { $set: { isVerifiedAccount } }
+      update
     );
     if (!result.matchedCount) return fail(res, 409, 'This account changed while you were reviewing it. Refresh and try again.');
     await logAction(req, user, 'verification_updated', '', null, null, isVerifiedAccount ? 'verified' : 'unverified');
-    res.json({ success: true, isVerifiedAccount, message: isVerifiedAccount ? 'Verified badge added.' : 'Verified badge removed.' });
+    res.json({ success: true, isVerifiedAccount, verificationBadgeColor: isVerifiedAccount ? verificationBadgeColor : user.verificationBadgeColor || 'blue', message: isVerifiedAccount ? 'Verified badge updated.' : 'Verified badge removed.' });
   } catch (error) { next(error); }
 };
 
