@@ -12,6 +12,7 @@ const PasswordResetState = require('../models/PasswordResetState');
 const SupportRequest = require('../models/SupportRequest');
 const AdminAuditLog = require('../models/AdminAuditLog');
 const { deleteUploadedMedia } = require('../middleware/uploadMiddleware');
+const { isVerifiedAccount } = require('../utils/verifiedAccount');
 
 const fail = (res, status, message) => res.status(status).json({ success: false, message });
 const validId = (id) => mongoose.Types.ObjectId.isValid(id);
@@ -52,10 +53,10 @@ const listUsers = async (req, res, next) => {
       else filter.$or = clauses;
     }
     const [users, total] = await Promise.all([
-      User.find(filter).select('name email profilePicture headline company jobTitle createdAt updatedAt moderationStatus moderationExpiresAt moderationReason').sort({ createdAt: -1, _id: 1 }).skip((page - 1) * limit).limit(limit).lean(),
+      User.find(filter).select('name email profilePicture headline company jobTitle createdAt updatedAt isVerifiedAccount moderationStatus moderationExpiresAt moderationReason').sort({ createdAt: -1, _id: 1 }).skip((page - 1) * limit).limit(limit).lean(),
       User.countDocuments(filter)
     ]);
-    res.json({ success: true, users: users.map((user) => ({ ...user, moderationStatus: user.moderationStatus || 'active' })), pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+    res.json({ success: true, users: users.map((user) => ({ ...user, isVerifiedAccount: isVerifiedAccount(user), moderationStatus: user.moderationStatus || 'active' })), pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
   } catch (error) { next(error); }
 };
 
@@ -85,6 +86,22 @@ const userPosts = async (req, res, next) => {
       Post.countDocuments({ author: req.params.id })
     ]);
     res.json({ success: true, posts, pagination: { page, limit, total, pages: Math.ceil(total / limit) } });
+  } catch (error) { next(error); }
+};
+
+const setVerification = async (req, res, next) => {
+  try {
+    const user = await findTarget(req, res);
+    if (!user) return;
+    if (typeof req.body?.isVerifiedAccount !== 'boolean') return fail(res, 400, 'Choose whether this account should be verified.');
+    const isVerifiedAccount = req.body.isVerifiedAccount;
+    const result = await User.updateOne(
+      { _id: user._id, moderationStatus: { $ne: 'deleted' } },
+      { $set: { isVerifiedAccount } }
+    );
+    if (!result.matchedCount) return fail(res, 409, 'This account changed while you were reviewing it. Refresh and try again.');
+    await logAction(req, user, 'verification_updated', '', null, null, isVerifiedAccount ? 'verified' : 'unverified');
+    res.json({ success: true, isVerifiedAccount, message: isVerifiedAccount ? 'Verified badge added.' : 'Verified badge removed.' });
   } catch (error) { next(error); }
 };
 
@@ -323,4 +340,4 @@ const updateInboxItem = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { overview, listUsers, userDetail, userPosts, temporaryBan, permanentBan, liftBan, addWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };
+module.exports = { overview, listUsers, userDetail, userPosts, setVerification, temporaryBan, permanentBan, liftBan, addWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };

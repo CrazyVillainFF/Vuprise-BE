@@ -88,7 +88,7 @@ const getUsers = async (req, res, next) => {
 
     const responseUsers = enhancedUsers.map((entry) => {
       const user = typeof entry.toObject === 'function' ? entry.toObject() : entry;
-      return { ...user, isVerifiedAccount: isVerifiedAccount(user.email) };
+      return { ...user, isVerifiedAccount: isVerifiedAccount(user) };
     });
 
     res.status(200).json({
@@ -128,12 +128,12 @@ const getSuggestedUsers = async (req, res, next) => {
     const suggested = await User.find({
       _id: { $nin: excludedIds }
     })
-      .select('email name headline profilePicture company jobTitle location skills connections')
+      .select('email name headline profilePicture company jobTitle location skills connections isVerifiedAccount')
       .limit(6);
 
     const suggestedUsers = suggested.map((entry) => {
       const user = entry.toObject();
-      const isVerified = isVerifiedAccount(user.email);
+      const isVerified = isVerifiedAccount(user);
       delete user.email;
       return { ...user, isVerifiedAccount: isVerified };
     });
@@ -154,9 +154,9 @@ const getUserById = async (req, res, next) => {
   try {
     const user = await User.findById(req.params.id)
       .select('-password')
-      .populate('connections', 'name headline profilePicture company jobTitle')
-      .populate('followers', 'name headline profilePicture')
-      .populate('following', 'name headline profilePicture');
+      .populate('connections', 'name headline profilePicture company jobTitle isVerifiedAccount')
+      .populate('followers', 'name headline profilePicture isVerifiedAccount')
+      .populate('following', 'name headline profilePicture isVerifiedAccount');
 
     if (!user) {
       return res.status(404).json({
@@ -166,7 +166,7 @@ const getUserById = async (req, res, next) => {
     }
 
     const userObj = user.toObject();
-    userObj.isVerifiedAccount = isVerifiedAccount(userObj.email);
+    userObj.isVerifiedAccount = isVerifiedAccount(userObj);
 
     // Check connection status if requester is authenticated
     if (req.user) {
@@ -386,7 +386,7 @@ const searchUsers = async (req, res, next) => {
         { location: regex }
       ]
     })
-      .select('name headline profilePicture company jobTitle location skills')
+      .select('name headline profilePicture company jobTitle location skills isVerifiedAccount')
       .limit(10);
 
     let postQuery = {

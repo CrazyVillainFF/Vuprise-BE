@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { isVerifiedAccount } = require('../utils/verifiedAccount');
 const { isAdminEmail } = require('../utils/adminAccess');
 const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
 
@@ -87,6 +88,7 @@ const register = async (req, res, next) => {
 
     // Return user without password
     const userObj = user.toObject();
+    userObj.isVerifiedAccount = isVerifiedAccount(userObj);
     delete userObj.password;
     delete userObj.moderationStatus;
     delete userObj.moderationExpiresAt;
@@ -150,6 +152,7 @@ const login = async (req, res, next) => {
     const token = generateToken(user);
 
     const userObj = user.toObject();
+    userObj.isVerifiedAccount = isVerifiedAccount(userObj);
     delete userObj.password;
     delete userObj.moderationStatus;
     delete userObj.moderationExpiresAt;
@@ -175,9 +178,9 @@ const login = async (req, res, next) => {
 const getMe = async (req, res, next) => {
   try {
     const user = await User.findById(req.user._id).select('+hideActivity +inactivityRemindersEnabled +moderationWarnings')
-      .populate('connections', 'name headline profilePicture company jobTitle')
-      .populate('followers', 'name headline profilePicture')
-      .populate('following', 'name headline profilePicture');
+      .populate('connections', 'name headline profilePicture company jobTitle isVerifiedAccount')
+      .populate('followers', 'name headline profilePicture isVerifiedAccount')
+      .populate('following', 'name headline profilePicture isVerifiedAccount');
 
     if (!user) {
       return res.status(404).json({
@@ -187,6 +190,7 @@ const getMe = async (req, res, next) => {
     }
 
     const safeUser = user.toObject();
+    safeUser.isVerifiedAccount = isVerifiedAccount(safeUser);
     delete safeUser.moderationStatus;
     delete safeUser.moderationExpiresAt;
     delete safeUser.moderationReason;

@@ -7,7 +7,7 @@ const { isAdminEmail } = require('../utils/adminAccess');
 const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { createRequest, consumeRateLimit } = require('../controllers/supportController');
-const { overview, listReports, sendSupportReply, updateInboxItem } = require('../controllers/adminController');
+const { overview, listReports, sendSupportReply, updateInboxItem, setVerification } = require('../controllers/adminController');
 const { listUsers } = require('../controllers/adminController');
 const jwt = require('jsonwebtoken');
 const { protect } = require('../middleware/authMiddleware');
@@ -120,9 +120,39 @@ test('admin user list selects only safe profile/moderation fields and paginates'
     assert.equal(limitValue, 20);
     assert.equal(res.body.pagination.pages, 3);
     assert.match(selectFields, /email/);
+    assert.match(selectFields, /isVerifiedAccount/);
     assert.doesNotMatch(selectFields, /password/);
     assert.equal(Object.hasOwn(res.body.users[0], 'password'), false);
   } finally { User.find = originalFind; User.countDocuments = originalCount; }
+});
+
+test('admins can grant and revoke a verified badge with an audit entry', async () => {
+  const originalFindById = User.findById;
+  const originalUpdateOne = User.updateOne;
+  const originalCreate = AdminAuditLog.create;
+  const target = { _id: '507f1f77bcf86cd799439012', moderationStatus: 'active', isVerifiedAccount: false };
+  let update;
+  let audit;
+  User.findById = () => ({ select: async () => target });
+  User.updateOne = async (...args) => { update = args; return { matchedCount: 1 }; };
+  AdminAuditLog.create = async (entry) => { audit = entry; return entry; };
+  try {
+    const res = response();
+    await setVerification({ params: { id: target._id }, body: { isVerifiedAccount: true }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.isVerifiedAccount, true);
+    assert.equal(update[1].$set.isVerifiedAccount, true);
+    assert.equal(audit.action, 'verification_updated');
+    assert.equal(audit.outcome, 'verified');
+
+    const invalid = response();
+    await setVerification({ params: { id: target._id }, body: { isVerifiedAccount: 'yes' }, user: { _id: '507f1f77bcf86cd799439011' } }, invalid, (error) => { throw error; });
+    assert.equal(invalid.statusCode, 400);
+  } finally {
+    User.findById = originalFindById;
+    User.updateOne = originalUpdateOne;
+    AdminAuditLog.create = originalCreate;
+  }
 });
 
 test('support replies accurately report Brevo acceptance and rejection without logging secrets', async () => {

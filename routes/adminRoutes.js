@@ -8,6 +8,7 @@ router.get('/overview', controller.overview);
 router.get('/users', controller.listUsers);
 router.get('/users/:id', controller.userDetail);
 router.get('/users/:id/posts', controller.userPosts);
+router.put('/users/:id/verification', controller.setVerification);
 router.post('/users/:id/temporary-ban', controller.temporaryBan);
 router.post('/users/:id/permanent-ban', controller.permanentBan);
 router.post('/users/:id/lift-ban', controller.liftBan);

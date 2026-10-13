@@ -57,6 +57,8 @@ const UserSchema = new mongoose.Schema({
       'Please provide a valid email address'
     ]
   },
+  // Undefined preserves the legacy designated-account badge until an admin explicitly overrides it.
+  isVerifiedAccount: { type: Boolean, default: undefined },
   password: {
     type: String,
     required: [true, 'Please provide a password'],
