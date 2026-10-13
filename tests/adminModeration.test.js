@@ -11,7 +11,7 @@ const { isAdminEmail } = require('../utils/adminAccess');
 const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { createRequest, consumeRateLimit } = require('../controllers/supportController');
-const { overview, listReports, sendSupportReply, updateInboxItem, setVerification, broadcastMessage } = require('../controllers/adminController');
+const { overview, listReports, sendSupportReply, updateInboxItem, setVerification, broadcastMessage, listBroadcastMessages } = require('../controllers/adminController');
 const { listUsers } = require('../controllers/adminController');
 const { listConversations } = require('../controllers/messageController');
 const jwt = require('jsonwebtoken');
@@ -211,7 +211,7 @@ test('admin broadcast creates an individual official Vuprise thread for each sel
   }
 });
 
-test('admin can see sent official message threads while recipients see Vuprise as the sender', async () => {
+test('admin-sent official threads stay out of private inboxes while recipients see Vuprise as the sender', async () => {
   const originals = { conversationFind: Conversation.find, connectionFind: Connection.find, messageAggregate: DirectMessage.aggregate };
   const adminId = '507f1f77bcf86cd799439011';
   const recipientId = '507f1f77bcf86cd799439012';
@@ -231,16 +231,12 @@ test('admin can see sent official message threads while recipients see Vuprise a
     const adminResponse = response();
     adminResponse.set = () => adminResponse;
     await listConversations({ user: { _id: admin._id, email: admin.email } }, adminResponse, (error) => { throw error; });
-    const adminThread = adminResponse.body.conversations[0];
-    assert.equal(adminThread.officialViewerIsSender, true);
-    assert.equal(adminThread.officialRecipient.name, 'A user');
-    assert.equal(adminThread.peer.name, 'A user');
+    assert.deepEqual(adminResponse.body.conversations, []);
 
     const recipientResponse = response();
     recipientResponse.set = () => recipientResponse;
     await listConversations({ user: { _id: { toString: () => recipientId }, email: 'user@example.com' } }, recipientResponse, (error) => { throw error; });
     const recipientThread = recipientResponse.body.conversations[0];
-    assert.equal(recipientThread.officialViewerIsSender, false);
     assert.equal(recipientThread.peer.name, 'Vuprise');
     assert.equal(recipientThread.peer.verificationBadgeColor, 'gold');
   } finally {
@@ -248,6 +244,28 @@ test('admin can see sent official message threads while recipients see Vuprise a
     Connection.find = originals.connectionFind;
     DirectMessage.aggregate = originals.messageAggregate;
     if (oldAdmins === undefined) delete process.env.ADMIN_EMAILS; else process.env.ADMIN_EMAILS = oldAdmins;
+  }
+});
+
+test('admin sent-message page lists official messages separately with their recipients', async () => {
+  const originals = { conversationFind: Conversation.find, messageCount: DirectMessage.countDocuments, messageFind: DirectMessage.find };
+  const recipientId = '507f1f77bcf86cd799439012';
+  const conversationId = '507f1f77bcf86cd799439013';
+  const recipient = { _id: recipientId, name: 'A user', email: 'user@example.com' };
+  Conversation.find = () => ({ select() { return this; }, populate() { return this; }, lean: async () => [{ _id: conversationId, officialRecipient: recipient }] });
+  DirectMessage.countDocuments = async () => 1;
+  DirectMessage.find = () => ({ sort() { return this; }, skip() { return this; }, limit() { return this; }, lean: async () => [{ _id: '507f1f77bcf86cd799439014', conversation: conversationId, sender: '507f1f77bcf86cd799439011', text: 'A Vuprise update', createdAt: new Date() }] });
+  try {
+    const res = response();
+    await listBroadcastMessages({ query: { page: '1', limit: '20' }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.messages[0].recipient.name, 'A user');
+    assert.equal(res.body.messages[0].text, 'A Vuprise update');
+    assert.equal(res.body.pagination.total, 1);
+  } finally {
+    Conversation.find = originals.conversationFind;
+    DirectMessage.countDocuments = originals.messageCount;
+    DirectMessage.find = originals.messageFind;
   }
 });
 

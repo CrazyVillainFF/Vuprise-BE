@@ -180,6 +180,31 @@ const broadcastMessage = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
+const listBroadcastMessages = async (req, res, next) => {
+  try {
+    const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+    const conversations = await Conversation.find({ isOfficialBroadcast: true, officialSender: req.user._id })
+      .select('_id officialRecipient')
+      .populate('officialRecipient', 'name email profilePicture')
+      .lean();
+    const conversationIds = conversations.map(({ _id }) => _id);
+    const recipientByConversation = new Map(conversations.map(({ _id, officialRecipient }) => [String(_id), officialRecipient]));
+    const filter = { conversation: { $in: conversationIds }, sender: req.user._id, hiddenFor: { $ne: req.user._id } };
+    const [total, messages] = conversationIds.length
+      ? await Promise.all([
+        DirectMessage.countDocuments(filter),
+        DirectMessage.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean()
+      ])
+      : [0, []];
+    res.json({
+      success: true,
+      messages: messages.map((message) => ({ ...message, recipient: recipientByConversation.get(String(message.conversation)) || null })),
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) }
+    });
+  } catch (error) { next(error); }
+};
+
 const findTarget = async (req, res) => {
   if (!validId(req.params.id)) { fail(res, 400, 'Invalid user ID.'); return null; }
   const user = await User.findById(req.params.id).select('+moderationStatus +moderationExpiresAt +moderationReason +moderationWarnings');
@@ -415,4 +440,4 @@ const updateInboxItem = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { overview, listUsers, userDetail, userPosts, setVerification, broadcastMessage, temporaryBan, permanentBan, liftBan, addWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };
+module.exports = { overview, listUsers, userDetail, userPosts, setVerification, broadcastMessage, listBroadcastMessages, temporaryBan, permanentBan, liftBan, addWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };

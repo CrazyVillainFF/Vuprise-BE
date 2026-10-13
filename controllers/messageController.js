@@ -29,9 +29,8 @@ const getAuthorizedConversation = async (conversationId, userId) => {
   if (!conversation) return null;
   if (conversation.isOfficialBroadcast) {
     const isRecipient = String(conversation.officialRecipient) === String(userId);
-    const isAdministrator = await User.findById(userId).select('email').lean().then((user) => isAdminEmail(user?.email));
-    if (!isRecipient && !isAdministrator) return null;
-    return { conversation, peerId: isRecipient ? conversation.officialSender : conversation.officialRecipient };
+    if (!isRecipient) return null;
+    return { conversation, peerId: conversation.officialSender };
   }
   const peerId = conversation.participants.find((participant) => participant.toString() !== userId.toString());
   if (!peerId || !(await hasAcceptedConnection(userId, peerId))) return null;
@@ -170,18 +169,13 @@ const listConversations = async (req, res, next) => {
     const conversations = await Conversation.find({ participants: req.user._id })
       .sort({ lastMessageAt: -1 })
       .populate('participants', 'name headline profilePicture isVerifiedAccount verificationBadgeColor');
-    const conversationsWithPeers = conversations.map((conversation) => {
-      const isOfficialRecipient = conversation.isOfficialBroadcast && String(conversation.officialRecipient) === String(req.user._id);
-      const isOfficialSender = conversation.isOfficialBroadcast && String(conversation.officialSender) === String(req.user._id) && isAdminEmail(req.user.email);
-      return {
-        conversation,
-        peer: isOfficialRecipient
-          ? { _id: conversation.officialSender, name: 'Vuprise', headline: 'Official Vuprise messages', isVerifiedAccount: true, verificationBadgeColor: 'gold' }
-          : conversation.participants.find((participant) => participant._id.toString() !== req.user._id.toString()),
-        isOfficialBroadcast: Boolean(conversation.isOfficialBroadcast),
-        officialViewerIsSender: Boolean(isOfficialSender)
-      };
-    }).filter(({ peer, conversation, isOfficialBroadcast, officialViewerIsSender }) => Boolean(peer) && !conversation.hiddenFor.some((userId) => userId.toString() === req.user._id.toString()) && (!isOfficialBroadcast || String(conversation.officialRecipient) === String(req.user._id) || officialViewerIsSender));
+    const conversationsWithPeers = conversations.map((conversation) => ({
+      conversation,
+      peer: conversation.isOfficialBroadcast && String(conversation.officialRecipient) === String(req.user._id)
+        ? { _id: conversation.officialSender, name: 'Vuprise', headline: 'Official Vuprise messages', isVerifiedAccount: true, verificationBadgeColor: 'gold' }
+        : conversation.participants.find((participant) => participant._id.toString() !== req.user._id.toString()),
+      isOfficialBroadcast: Boolean(conversation.isOfficialBroadcast)
+    })).filter(({ peer, conversation, isOfficialBroadcast }) => Boolean(peer) && !conversation.hiddenFor.some((userId) => userId.toString() === req.user._id.toString()) && (!isOfficialBroadcast || String(conversation.officialRecipient) === String(req.user._id)));
     const peerIds = conversationsWithPeers.map(({ peer }) => peer._id);
     const acceptedConnections = peerIds.length ? await Connection.find({
       status: 'accepted',
@@ -217,12 +211,10 @@ const listConversations = async (req, res, next) => {
     const latestByConversation = new Map(latestMessages.map(({ _id, lastMessage, unreadCount }) => (
       [_id.toString(), { lastMessage, unreadCount }]
     )));
-    const visible = visibleConversations.map(({ conversation, peer, officialViewerIsSender }) => ({
+    const visible = visibleConversations.map(({ conversation, peer }) => ({
       _id: conversation._id,
       peer,
       isOfficialBroadcast: Boolean(conversation.isOfficialBroadcast),
-      officialViewerIsSender,
-      officialRecipient: officialViewerIsSender ? peer : null,
       readOnly: Boolean(conversation.isOfficialBroadcast),
       displayName: conversation.displayNames.find(({ user }) => user.toString() === req.user._id.toString())?.name || '',
       lastMessageAt: conversation.lastMessageAt,
