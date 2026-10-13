@@ -3,12 +3,17 @@ const assert = require('node:assert/strict');
 const User = require('../models/User');
 const SupportRequest = require('../models/SupportRequest');
 const AdminAuditLog = require('../models/AdminAuditLog');
+const Conversation = require('../models/Conversation');
+const Connection = require('../models/Connection');
+const DirectMessage = require('../models/DirectMessage');
+const Notification = require('../models/Notification');
 const { isAdminEmail } = require('../utils/adminAccess');
 const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { createRequest, consumeRateLimit } = require('../controllers/supportController');
-const { overview, listReports, sendSupportReply, updateInboxItem, setVerification } = require('../controllers/adminController');
+const { overview, listReports, sendSupportReply, updateInboxItem, setVerification, broadcastMessage } = require('../controllers/adminController');
 const { listUsers } = require('../controllers/adminController');
+const { listConversations } = require('../controllers/messageController');
 const jwt = require('jsonwebtoken');
 const { protect } = require('../middleware/authMiddleware');
 
@@ -138,20 +143,111 @@ test('admins can grant and revoke a verified badge with an audit entry', async (
   AdminAuditLog.create = async (entry) => { audit = entry; return entry; };
   try {
     const res = response();
-    await setVerification({ params: { id: target._id }, body: { isVerifiedAccount: true }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
+    await setVerification({ params: { id: target._id }, body: { isVerifiedAccount: true, verificationBadgeColor: 'gold' }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.isVerifiedAccount, true);
     assert.equal(update[1].$set.isVerifiedAccount, true);
+    assert.equal(update[1].$set.verificationBadgeColor, 'gold');
+    assert.equal(res.body.verificationBadgeColor, 'gold');
     assert.equal(audit.action, 'verification_updated');
     assert.equal(audit.outcome, 'verified');
 
     const invalid = response();
     await setVerification({ params: { id: target._id }, body: { isVerifiedAccount: 'yes' }, user: { _id: '507f1f77bcf86cd799439011' } }, invalid, (error) => { throw error; });
     assert.equal(invalid.statusCode, 400);
+    const invalidColor = response();
+    await setVerification({ params: { id: target._id }, body: { isVerifiedAccount: true, verificationBadgeColor: 'purple' }, user: { _id: '507f1f77bcf86cd799439011' } }, invalidColor, (error) => { throw error; });
+    assert.equal(invalidColor.statusCode, 400);
   } finally {
     User.findById = originalFindById;
     User.updateOne = originalUpdateOne;
     AdminAuditLog.create = originalCreate;
+  }
+});
+
+test('admin broadcast creates an individual official Vuprise thread for each selected recipient', async () => {
+  const originals = {
+    userFind: User.find,
+    conversationBulkWrite: Conversation.bulkWrite,
+    conversationFind: Conversation.find,
+    conversationUpdateMany: Conversation.updateMany,
+    messageInsertMany: DirectMessage.insertMany,
+    notificationInsertMany: Notification.insertMany,
+    auditCreate: AdminAuditLog.create,
+  };
+  const adminId = '507f1f77bcf86cd799439011';
+  const recipientId = '507f1f77bcf86cd799439012';
+  const threadId = '507f1f77bcf86cd799439013';
+  let insertedMessages; let upsertOperations; let insertedNotifications;
+  User.find = () => ({ select: () => ({ lean: async () => [{ _id: recipientId }] }) });
+  Conversation.bulkWrite = async (operations) => { upsertOperations = operations; return {}; };
+  Conversation.find = () => ({ select: () => ({ lean: async () => [{ _id: threadId, officialRecipient: recipientId, officialSender: adminId }] }) });
+  Conversation.updateMany = async () => ({ modifiedCount: 1 });
+  DirectMessage.insertMany = async (messages) => { insertedMessages = messages; return messages; };
+  Notification.insertMany = async (notifications) => { insertedNotifications = notifications; return notifications; };
+  AdminAuditLog.create = async (entry) => entry;
+  try {
+    const res = response();
+    await broadcastMessage({ body: { text: 'A Vuprise update', recipientIds: [recipientId] }, user: { _id: adminId } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.recipientCount, 1);
+    assert.equal(upsertOperations[0].updateOne.filter.pairKey, `official:${recipientId}`);
+    assert.equal(upsertOperations[0].updateOne.update.$setOnInsert.isOfficialBroadcast, true);
+    assert.equal(insertedMessages[0].conversation, threadId);
+    assert.equal(insertedMessages[0].sender, adminId);
+    assert.equal(insertedMessages[0].text, 'A Vuprise update');
+    assert.deepEqual(insertedMessages[0].readBy, [adminId]);
+    assert.equal(insertedNotifications[0].recipient, recipientId);
+    assert.equal(insertedNotifications[0].type, 'official_message');
+    assert.equal(insertedNotifications[0].conversation, threadId);
+  } finally {
+    User.find = originals.userFind;
+    Conversation.bulkWrite = originals.conversationBulkWrite;
+    Conversation.find = originals.conversationFind;
+    Conversation.updateMany = originals.conversationUpdateMany;
+    DirectMessage.insertMany = originals.messageInsertMany;
+    Notification.insertMany = originals.notificationInsertMany;
+    AdminAuditLog.create = originals.auditCreate;
+  }
+});
+
+test('admin can see sent official message threads while recipients see Vuprise as the sender', async () => {
+  const originals = { conversationFind: Conversation.find, connectionFind: Connection.find, messageAggregate: DirectMessage.aggregate };
+  const adminId = '507f1f77bcf86cd799439011';
+  const recipientId = '507f1f77bcf86cd799439012';
+  const threadId = '507f1f77bcf86cd799439013';
+  const admin = { _id: { toString: () => adminId }, name: 'Vishnu', email: 'admin@example.com' };
+  const recipient = { _id: { toString: () => recipientId }, name: 'A user', headline: 'Designer', profilePicture: '', isVerifiedAccount: false };
+  const conversation = {
+    _id: threadId, isOfficialBroadcast: true, officialSender: adminId, officialRecipient: recipientId,
+    participants: [admin, recipient], hiddenFor: [], displayNames: [], lastMessageAt: new Date()
+  };
+  const oldAdmins = process.env.ADMIN_EMAILS;
+  process.env.ADMIN_EMAILS = 'admin@example.com';
+  Conversation.find = () => ({ sort() { return this; }, populate: async () => [conversation] });
+  Connection.find = () => ({ select: () => ({ lean: async () => [] }) });
+  DirectMessage.aggregate = async () => [];
+  try {
+    const adminResponse = response();
+    adminResponse.set = () => adminResponse;
+    await listConversations({ user: { _id: admin._id, email: admin.email } }, adminResponse, (error) => { throw error; });
+    const adminThread = adminResponse.body.conversations[0];
+    assert.equal(adminThread.officialViewerIsSender, true);
+    assert.equal(adminThread.officialRecipient.name, 'A user');
+    assert.equal(adminThread.peer.name, 'A user');
+
+    const recipientResponse = response();
+    recipientResponse.set = () => recipientResponse;
+    await listConversations({ user: { _id: { toString: () => recipientId }, email: 'user@example.com' } }, recipientResponse, (error) => { throw error; });
+    const recipientThread = recipientResponse.body.conversations[0];
+    assert.equal(recipientThread.officialViewerIsSender, false);
+    assert.equal(recipientThread.peer.name, 'Vuprise');
+    assert.equal(recipientThread.peer.verificationBadgeColor, 'gold');
+  } finally {
+    Conversation.find = originals.conversationFind;
+    Connection.find = originals.connectionFind;
+    DirectMessage.aggregate = originals.messageAggregate;
+    if (oldAdmins === undefined) delete process.env.ADMIN_EMAILS; else process.env.ADMIN_EMAILS = oldAdmins;
   }
 });
 
