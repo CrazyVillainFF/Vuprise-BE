@@ -5,6 +5,7 @@ const User = require('../models/User');
 const fs = require('fs/promises');
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
 const { canViewUserPosts, isBlockedBy, postVisibilityFilter, addPostVisibility } = require('../utils/postVisibility');
+const { normalizePostReaction, togglePostReaction } = require('../utils/postReactions');
 
 const savePostMedia = async (file, req, body = {}) => {
   if (!file) return null;
@@ -87,6 +88,20 @@ const createPost = async (req, res, next) => {
 // @desc    Get home feed posts
 // @route   GET /api/posts/feed
 // @access  Public / Optional Auth
+const formatPostReactions = (post, userId) => {
+  const formatted = typeof post.toObject === 'function' ? post.toObject() : { ...post };
+  const reactions = Array.isArray(formatted.reactions) ? formatted.reactions : [];
+  formatted.reactionCounts = reactions.reduce((counts, reaction) => {
+    counts[reaction.emoji] = (counts[reaction.emoji] || 0) + 1;
+    return counts;
+  }, {});
+  formatted.reactionCount = reactions.length;
+  formatted.myReaction = userId
+    ? reactions.find((reaction) => String(reaction.user?._id || reaction.user) === String(userId))?.emoji || null
+    : null;
+  return formatted;
+};
+
 const getFeed = async (req, res, next) => {
   try {
     const page = parseInt(req.query.page, 10) || 1;
@@ -117,11 +132,11 @@ const getFeed = async (req, res, next) => {
       .limit(limit);
 
     // Add isLiked status relative to authenticated user
-    const formattedPosts = posts.map(p => {
-      const pObj = p.toObject();
+    const formattedPosts = posts.map((p) => {
+      const pObj = formatPostReactions(p, req.user?._id);
       pObj.likeCount = p.likes ? p.likes.length : 0;
       pObj.commentCount = p.comments ? p.comments.length : 0;
-      pObj.isLiked = req.user ? p.likes.some(id => id.toString() === req.user._id.toString()) : false;
+      pObj.isLiked = req.user ? p.likes.some((id) => id.toString() === req.user._id.toString()) : false;
       return pObj;
     });
 
@@ -170,11 +185,11 @@ const getUserPosts = async (req, res, next) => {
       .skip(skip)
       .limit(limit);
 
-    const formattedPosts = posts.map(p => {
-      const pObj = p.toObject();
+    const formattedPosts = posts.map((p) => {
+      const pObj = formatPostReactions(p, req.user?._id);
       pObj.likeCount = p.likes ? p.likes.length : 0;
       pObj.commentCount = p.comments ? p.comments.length : 0;
-      pObj.isLiked = req.user ? p.likes.some(id => id.toString() === req.user._id.toString()) : false;
+      pObj.isLiked = req.user ? p.likes.some((id) => id.toString() === req.user._id.toString()) : false;
       return pObj;
     });
 
@@ -220,10 +235,10 @@ const getPostById = async (req, res, next) => {
       return res.status(403).json({ success: false, privateAccount: true, message: 'This account is private.' });
     }
 
-    const pObj = post.toObject();
+    const pObj = formatPostReactions(post, req.user?._id);
     pObj.likeCount = post.likes ? post.likes.length : 0;
     pObj.commentCount = post.comments ? post.comments.length : 0;
-    pObj.isLiked = req.user ? post.likes.some(id => id.toString() === req.user._id.toString()) : false;
+    pObj.isLiked = req.user ? post.likes.some((id) => id.toString() === req.user._id.toString()) : false;
 
     res.status(200).json({
       success: true,
@@ -298,7 +313,7 @@ const updatePost = async (req, res, next) => {
     const updated = await Post.findById(post._id)
       .populate('author', 'name headline profilePicture company jobTitle location');
 
-    const pObj = updated.toObject();
+    const pObj = formatPostReactions(updated, req.user._id);
     delete pObj.videoSourceUrl;
     delete pObj.videoSourcePublicId;
     delete pObj.videoSourceDuration;
@@ -409,6 +424,39 @@ const toggleLikePost = async (req, res, next) => {
   }
 };
 
+
+// @desc    Toggle a reaction on a post
+// @route   PUT /api/posts/:id/reactions
+// @access  Private
+const togglePostReaction = async (req, res, next) => {
+  try {
+    const post = await Post.findById(req.params.id);
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found.' });
+
+    const owner = await User.findById(post.author).select('privateAccount _id');
+    if (!(await canViewUserPosts(req.user._id, owner))) {
+      return res.status(403).json({ success: false, privateAccount: true, message: 'This account is private.' });
+    }
+
+    const emoji = normalizePostReaction(req.body?.emoji);
+    if (!emoji) return res.status(400).json({ success: false, message: 'Choose one of the supported post reactions.' });
+
+    post.reactions = togglePostReaction(post.reactions, req.user._id, emoji);
+    await post.save();
+
+    const formatted = formatPostReactions(post, req.user._id);
+    res.status(200).json({
+      success: true,
+      reactions: formatted.reactions,
+      reactionCounts: formatted.reactionCounts,
+      reactionCount: formatted.reactionCount,
+      myReaction: formatted.myReaction
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createPost,
   getFeed,
@@ -416,5 +464,6 @@ module.exports = {
   getPostById,
   updatePost,
   deletePost,
-  toggleLikePost
+  toggleLikePost,
+  togglePostReaction
 };
