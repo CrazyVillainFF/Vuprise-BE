@@ -56,6 +56,11 @@ test('server rejects oversized, invalid-format, invalid-trim and malformed uploa
   assert.equal(validateSignRequest(validRequest({ trimStart: 40, trimEnd: 75 })).trimStart, 40);
   assert.throws(() => validateSignRequest(validRequest({ trimStart: 31, trimEnd: 30 })), { code: 'invalid_trim' });
   assert.throws(() => validateSignRequest(validRequest({ idempotencyKey: 'bad' })), { code: 'invalid_request' });
+  const reel = validateSignRequest(validRequest({ trimStart: 52, trimEnd: 80, coverTime: 61, presentation: 'reel', cropMode: 'fit' }));
+  assert.equal(reel.trimStart, 52);
+  assert.equal(reel.coverTime, 61);
+  assert.equal(reel.cropMode, 'fit');
+  assert.throws(() => validateSignRequest(validRequest({ presentation: 'reel', coverTime: 31 })), { code: 'invalid_presentation' });
 });
 
 test('unauthorized callers cannot receive a signed upload authorization', async () => {
@@ -110,13 +115,14 @@ test('publish independently validates ownership, format, size, duration and clip
   };
   let destroyed = false;
   let createdPost;
+  let deliveredTransforms = [];
   const postId = new mongoose.Types.ObjectId();
   const populated = { toObject: () => ({ _id: postId, author: { _id: userId } }) };
   VideoUploadSession.findOne = async () => session;
   Post.findOne = () => query(null);
   cloudinary.api.resource = async () => resource;
   cloudinary.uploader.destroy = async () => { destroyed = true; };
-  cloudinary.url = (publicId, options) => `https://res.cloudinary.com/test-cloud/${options.resource_type}/upload/${publicId}`;
+  cloudinary.url = (publicId, options) => { deliveredTransforms.push(options.transformation[0]); return `https://res.cloudinary.com/test-cloud/${options.resource_type}/upload/${publicId}`; };
   Post.create = async (data) => { createdPost = data; return { ...data, _id: postId }; };
   Post.findById = () => ({ populate: async () => populated });
 
@@ -128,6 +134,23 @@ test('publish independently validates ownership, format, size, duration and clip
   assert.equal(createdPost.tags[0], 'video');
   assert.equal(session.status, 'published');
   assert.equal(res.body.post.isLiked, false);
+  assert.equal(deliveredTransforms[0].width, undefined);
+
+  session.presentation = 'reel';
+  session.cropMode = 'cover';
+  session.coverTime = 18;
+  session.status = 'uploading';
+  deliveredTransforms = [];
+  const reelResponse = response();
+  await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId), content: 'Vertical #reel' } }, reelResponse, assert.fail);
+  assert.equal(reelResponse.statusCode, 201);
+  assert.equal(createdPost.videoPresentation, 'reel');
+  assert.equal(createdPost.videoCropMode, 'cover');
+  assert.equal(createdPost.videoCoverTime, 18);
+  assert.equal(deliveredTransforms[0].width, 1080);
+  assert.equal(deliveredTransforms[0].height, 1920);
+  assert.equal(deliveredTransforms[0].crop, 'fill');
+  assert.equal(deliveredTransforms[1].start_offset, 18);
 
   for (const invalid of [
     { ...resource, context: { custom: { user_id: 'someone-else', upload_session: String(sessionId) } } },

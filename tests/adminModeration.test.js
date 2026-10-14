@@ -12,6 +12,7 @@ const { getAccountRestriction, getPendingWarnings } = require('../utils/accountM
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { createRequest, consumeRateLimit } = require('../controllers/supportController');
 const { overview, listReports, sendSupportReply, updateInboxItem, setVerification, broadcastMessage, listBroadcastMessages } = require('../controllers/adminController');
+const AdminBroadcast = require('../models/AdminBroadcast');
 const { listUsers } = require('../controllers/adminController');
 const { listConversations } = require('../controllers/messageController');
 const jwt = require('jsonwebtoken');
@@ -174,11 +175,13 @@ test('admin broadcast creates an individual official Vuprise thread for each sel
     messageInsertMany: DirectMessage.insertMany,
     notificationInsertMany: Notification.insertMany,
     auditCreate: AdminAuditLog.create,
+    broadcastCreate: AdminBroadcast.create,
   };
   const adminId = '507f1f77bcf86cd799439011';
   const recipientId = '507f1f77bcf86cd799439012';
   const threadId = '507f1f77bcf86cd799439013';
   let insertedMessages; let upsertOperations; let insertedNotifications;
+  let savedBroadcast;
   User.find = () => ({ select: () => ({ lean: async () => [{ _id: recipientId }] }) });
   Conversation.bulkWrite = async (operations) => { upsertOperations = operations; return {}; };
   Conversation.find = () => ({ select: () => ({ lean: async () => [{ _id: threadId, officialRecipient: recipientId, officialSender: adminId }] }) });
@@ -186,6 +189,7 @@ test('admin broadcast creates an individual official Vuprise thread for each sel
   DirectMessage.insertMany = async (messages) => { insertedMessages = messages; return messages; };
   Notification.insertMany = async (notifications) => { insertedNotifications = notifications; return notifications; };
   AdminAuditLog.create = async (entry) => entry;
+  AdminBroadcast.create = async (entry) => { savedBroadcast = entry; return entry; };
   try {
     const res = response();
     await broadcastMessage({ body: { text: 'A Vuprise update', recipientIds: [recipientId] }, user: { _id: adminId } }, res, (error) => { throw error; });
@@ -200,6 +204,9 @@ test('admin broadcast creates an individual official Vuprise thread for each sel
     assert.equal(insertedNotifications[0].recipient, recipientId);
     assert.equal(insertedNotifications[0].type, 'official_message');
     assert.equal(insertedNotifications[0].conversation, threadId);
+    assert.equal(savedBroadcast.text, 'A Vuprise update');
+    assert.deepEqual(savedBroadcast.recipients, [recipientId]);
+    assert.equal(savedBroadcast.recipientCount, 1);
   } finally {
     User.find = originals.userFind;
     Conversation.bulkWrite = originals.conversationBulkWrite;
@@ -208,6 +215,7 @@ test('admin broadcast creates an individual official Vuprise thread for each sel
     DirectMessage.insertMany = originals.messageInsertMany;
     Notification.insertMany = originals.notificationInsertMany;
     AdminAuditLog.create = originals.auditCreate;
+    AdminBroadcast.create = originals.broadcastCreate;
   }
 });
 
@@ -247,25 +255,51 @@ test('admin-sent official threads stay out of private inboxes while recipients s
   }
 });
 
-test('admin sent-message page lists official messages separately with their recipients', async () => {
-  const originals = { conversationFind: Conversation.find, messageCount: DirectMessage.countDocuments, messageFind: DirectMessage.find };
+test('admin sent-message page reads durable broadcast history with recipients', async () => {
+  const originals = { conversationFind: Conversation.find, messageCount: DirectMessage.countDocuments, messageFind: DirectMessage.find, broadcastFind: AdminBroadcast.find, broadcastCount: AdminBroadcast.countDocuments };
   const recipientId = '507f1f77bcf86cd799439012';
   const conversationId = '507f1f77bcf86cd799439013';
   const recipient = { _id: recipientId, name: 'A user', email: 'user@example.com' };
-  Conversation.find = () => ({ select() { return this; }, populate() { return this; }, lean: async () => [{ _id: conversationId, officialRecipient: recipient }] });
-  DirectMessage.countDocuments = async () => 1;
-  DirectMessage.find = () => ({ sort() { return this; }, skip() { return this; }, limit() { return this; }, lean: async () => [{ _id: '507f1f77bcf86cd799439014', conversation: conversationId, sender: '507f1f77bcf86cd799439011', text: 'A Vuprise update', createdAt: new Date() }] });
+  AdminBroadcast.find = () => ({ populate() { return this; }, sort() { return this; }, skip() { return this; }, limit() { return this; }, lean: async () => [{ _id: '507f1f77bcf86cd799439014', text: 'A Vuprise update', recipients: [recipient], recipientCount: 1, createdAt: new Date() }] });
+  AdminBroadcast.countDocuments = async () => 1;
   try {
     const res = response();
     await listBroadcastMessages({ query: { page: '1', limit: '20' }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
     assert.equal(res.statusCode, 200);
-    assert.equal(res.body.messages[0].recipient.name, 'A user');
+    assert.equal(res.body.messages[0].recipients[0].name, 'A user');
     assert.equal(res.body.messages[0].text, 'A Vuprise update');
     assert.equal(res.body.pagination.total, 1);
   } finally {
     Conversation.find = originals.conversationFind;
     DirectMessage.countDocuments = originals.messageCount;
     DirectMessage.find = originals.messageFind;
+    AdminBroadcast.find = originals.broadcastFind;
+    AdminBroadcast.countDocuments = originals.broadcastCount;
+  }
+});
+
+test('admin sent-message page can recover broadcasts created before history records existed', async () => {
+  const originals = { conversationFind: Conversation.find, messageCount: DirectMessage.countDocuments, messageFind: DirectMessage.find, broadcastFind: AdminBroadcast.find, broadcastCount: AdminBroadcast.countDocuments };
+  const conversationId = '507f1f77bcf86cd799439013';
+  const adminId = '507f1f77bcf86cd799439011';
+  const recipient = { _id: '507f1f77bcf86cd799439012', name: 'A user', email: 'user@example.com' };
+  AdminBroadcast.find = () => ({ populate() { return this; }, sort() { return this; }, skip() { return this; }, limit() { return this; }, lean: async () => [] });
+  AdminBroadcast.countDocuments = async () => 0;
+  Conversation.find = () => ({ select() { return this; }, populate() { return this; }, lean: async () => [{ _id: conversationId, officialRecipient: recipient, participants: [{ _id: adminId }, recipient] }] });
+  DirectMessage.countDocuments = async () => 1;
+  DirectMessage.find = () => ({ sort() { return this; }, skip() { return this; }, limit() { return this; }, lean: async () => [{ _id: '507f1f77bcf86cd799439014', conversation: conversationId, sender: adminId, text: 'Legacy Vuprise message', createdAt: new Date() }] });
+  try {
+    const res = response();
+    await listBroadcastMessages({ query: { page: '1', limit: '20' }, user: { _id: adminId } }, res, (error) => { throw error; });
+    assert.equal(res.body.messages[0].text, 'Legacy Vuprise message');
+    assert.equal(res.body.messages[0].recipients[0].name, 'A user');
+    assert.equal(res.body.messages[0].recipientCount, 1);
+  } finally {
+    Conversation.find = originals.conversationFind;
+    DirectMessage.countDocuments = originals.messageCount;
+    DirectMessage.find = originals.messageFind;
+    AdminBroadcast.find = originals.broadcastFind;
+    AdminBroadcast.countDocuments = originals.broadcastCount;
   }
 });
 

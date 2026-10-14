@@ -11,6 +11,7 @@ const GroupMessage = require('../models/GroupMessage');
 const PasswordResetState = require('../models/PasswordResetState');
 const SupportRequest = require('../models/SupportRequest');
 const AdminAuditLog = require('../models/AdminAuditLog');
+const AdminBroadcast = require('../models/AdminBroadcast');
 const { deleteUploadedMedia } = require('../middleware/uploadMiddleware');
 const { isVerifiedAccount } = require('../utils/verifiedAccount');
 
@@ -163,6 +164,7 @@ const broadcastMessage = async (req, res, next) => {
     for (let offset = 0; offset < messages.length; offset += 500) {
       await DirectMessage.insertMany(messages.slice(offset, offset + 500));
     }
+    await AdminBroadcast.create({ admin: req.user._id, text, recipients: recipientObjectIds, recipientCount: recipients.length, createdAt: sentAt });
     await Conversation.updateMany({ _id: { $in: threads.map(({ _id }) => _id) } }, { $set: { lastMessageAt: sentAt } });
     const officialNotifications = recipients.map(({ _id }) => ({
       recipient: _id,
@@ -184,12 +186,44 @@ const listBroadcastMessages = async (req, res, next) => {
   try {
     const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
     const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
-    const conversations = await Conversation.find({ isOfficialBroadcast: true, officialSender: req.user._id })
-      .select('_id officialRecipient')
+    const [broadcasts, historyTotal] = await Promise.all([
+      AdminBroadcast.find({ admin: req.user._id })
+        .populate('recipients', 'name email profilePicture')
+        .sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      AdminBroadcast.countDocuments({ admin: req.user._id }),
+    ]);
+    if (historyTotal) {
+      return res.json({
+        success: true,
+        messages: broadcasts.map((broadcast) => ({
+          _id: broadcast._id,
+          text: broadcast.text,
+          createdAt: broadcast.createdAt,
+          recipientCount: broadcast.recipientCount,
+          recipients: broadcast.recipients || [],
+        })),
+        pagination: { page, limit, total: historyTotal, pages: Math.ceil(historyTotal / limit) },
+      });
+    }
+
+    // Older broadcasts predate the durable history record. Recover them from
+    // their official conversations so administrators can still see them.
+    const conversations = await Conversation.find({
+      participants: req.user._id,
+      $or: [
+        { isOfficialBroadcast: true },
+        { pairKey: /^official:/ },
+      ],
+    })
+      .select('_id officialRecipient officialSender participants')
       .populate('officialRecipient', 'name email profilePicture')
+      .populate('participants', 'name email profilePicture')
       .lean();
     const conversationIds = conversations.map(({ _id }) => _id);
-    const recipientByConversation = new Map(conversations.map(({ _id, officialRecipient }) => [String(_id), officialRecipient]));
+    const recipientByConversation = new Map(conversations.map(({ _id, officialRecipient, participants }) => {
+      const recipient = officialRecipient || (participants || []).find((participant) => String(participant?._id || participant) !== String(req.user._id));
+      return [String(_id), recipient || null];
+    }));
     const filter = { conversation: { $in: conversationIds }, sender: req.user._id, hiddenFor: { $ne: req.user._id } };
     const [total, messages] = conversationIds.length
       ? await Promise.all([
@@ -199,7 +233,7 @@ const listBroadcastMessages = async (req, res, next) => {
       : [0, []];
     res.json({
       success: true,
-      messages: messages.map((message) => ({ ...message, recipient: recipientByConversation.get(String(message.conversation)) || null })),
+      messages: messages.map((message) => ({ ...message, recipients: [recipientByConversation.get(String(message.conversation))].filter(Boolean), recipientCount: 1 })),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) }
     });
   } catch (error) { next(error); }

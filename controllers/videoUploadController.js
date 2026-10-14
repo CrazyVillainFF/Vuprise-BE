@@ -28,7 +28,7 @@ const reportMetric = (event, startedAt, bytes, category = 'ok') => {
   }));
 };
 
-const validateSignRequest = ({ mimeType, fileSize, trimStart, trimEnd, idempotencyKey }) => {
+const validateSignRequest = ({ mimeType, fileSize, trimStart, trimEnd, idempotencyKey, presentation = 'post', cropMode = 'cover', coverTime }) => {
   const start = Number(trimStart);
   const end = Number(trimEnd);
   const size = Number(fileSize);
@@ -42,7 +42,11 @@ const validateSignRequest = ({ mimeType, fileSize, trimStart, trimEnd, idempoten
   if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9_-]{16,80}$/.test(idempotencyKey)) {
     throw httpError(400, 'The upload could not be started. Please retry.', 'invalid_request');
   }
-  return { mimeType, fileSize: size, trimStart: start, trimEnd: end, idempotencyKey };
+  const cover = coverTime === undefined ? start : Number(coverTime);
+  if (!['post', 'reel'].includes(presentation) || !['cover', 'fit'].includes(cropMode) || !Number.isFinite(cover) || cover < start || cover > end) {
+    throw httpError(400, 'Choose a valid Reel layout and cover frame.', 'invalid_presentation');
+  }
+  return { mimeType, fileSize: size, trimStart: start, trimEnd: end, idempotencyKey, presentation, cropMode, coverTime: cover };
 };
 
 const signUpload = async (req, res, next) => {
@@ -74,12 +78,15 @@ const signUpload = async (req, res, next) => {
         publicId,
         trimStart: input.trimStart,
         trimEnd: input.trimEnd,
+        presentation: input.presentation,
+        cropMode: input.cropMode,
+        coverTime: input.coverTime,
         declaredBytes: input.fileSize,
         mimeType: input.mimeType,
         authorizationIssuedAt: new Date(),
         cleanupAfter: new Date(Date.now() + CLEANUP_AFTER_MS),
       });
-    } else if (session.declaredBytes !== input.fileSize || session.mimeType !== input.mimeType || session.trimStart !== input.trimStart || session.trimEnd !== input.trimEnd) {
+    } else if (session.declaredBytes !== input.fileSize || session.mimeType !== input.mimeType || session.trimStart !== input.trimStart || session.trimEnd !== input.trimEnd || (session.presentation || 'post') !== input.presentation || (session.cropMode || 'cover') !== input.cropMode || (session.coverTime ?? session.trimStart) !== input.coverTime) {
       throw httpError(409, 'The selected video or trim range changed. Select the video again to retry.', 'upload_mismatch');
     } else {
       // Refresh the ticket's provider timestamp for a safe retry using the same idempotency key.
@@ -119,18 +126,23 @@ const signUpload = async (req, res, next) => {
   }
 };
 
-const makeVideoUrls = (publicId, start, end) => ({
+const makeVideoUrls = (publicId, start, end, presentation = 'post', cropMode = 'cover', coverTime = start) => ({
   videoUrl: cloudinary.url(publicId, {
     secure: true,
     resource_type: 'video',
     format: 'mp4',
-    transformation: [{ start_offset: start, end_offset: end, video_codec: 'h264' }],
+    transformation: [{
+      start_offset: start,
+      end_offset: end,
+      ...(presentation === 'reel' ? { width: 1080, height: 1920, crop: cropMode === 'cover' ? 'fill' : 'fit', gravity: 'auto' } : {}),
+      video_codec: 'h264',
+    }],
   }),
   videoThumbnail: cloudinary.url(publicId, {
     secure: true,
     resource_type: 'video',
     format: 'jpg',
-    transformation: [{ start_offset: start, width: 640, crop: 'limit' }],
+    transformation: [{ start_offset: coverTime, width: 640, ...(presentation === 'reel' ? { height: 1138, crop: cropMode === 'cover' ? 'fill' : 'fit', gravity: 'auto' } : { crop: 'limit' }) }],
   }),
 });
 
@@ -178,7 +190,7 @@ const publishUploadedVideo = async (req, res, next) => {
 
     const contentText = content.trim();
     const tags = [...new Set((contentText.match(/#[a-zA-Z0-9_]+/g) || []).map((tag) => tag.slice(1).toLowerCase()))];
-    const { videoUrl, videoThumbnail } = makeVideoUrls(session.publicId, session.trimStart, session.trimEnd);
+    const { videoUrl, videoThumbnail } = makeVideoUrls(session.publicId, session.trimStart, session.trimEnd, session.presentation, session.cropMode, session.coverTime);
     let post;
     try {
       post = await Post.create({
@@ -192,6 +204,9 @@ const publishUploadedVideo = async (req, res, next) => {
         videoSourcePublicId: '',
         videoSourceDuration: sourceDuration,
         videoDuration: session.trimEnd - session.trimStart,
+        videoPresentation: session.presentation,
+        videoCropMode: session.cropMode,
+        videoCoverTime: session.coverTime,
         videoTrimStart: session.trimStart,
         videoTrimEnd: session.trimEnd,
         videoThumbnail,
