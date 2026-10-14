@@ -28,6 +28,34 @@ const readCloudinaryDurationSeconds = (resource) => {
   const duration = Number(value);
   return Number.isFinite(duration) && duration > 0 ? duration : NaN;
 };
+const safeProviderMessage = (value) => {
+  if (typeof value !== 'string') return undefined;
+  return value
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[url]')
+    .replace(/\b(api[_-]?key|api[_-]?secret|token|signature|authorization|password)\s*[:=]\s*[^,\s;]+/gi, '$1=[redacted]')
+    .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '[redacted]')
+    .slice(0, 180);
+};
+const logCloudinaryResourceLookup = (session, resource) => {
+  const duration = resource?.duration;
+  console.info('[video-upload] cloudinary-resource-lookup', JSON.stringify({
+    requestedPublicId: session.publicId,
+    requestedResourceType: 'video',
+    requestedDeliveryType: 'upload',
+    uploadSessionId: String(session._id),
+    resourceReturned: Boolean(resource),
+    returnedPublicId: typeof resource?.public_id === 'string' ? resource.public_id : null,
+    publicIdMatches: resource?.public_id === session.publicId,
+    returnedResourceType: typeof resource?.resource_type === 'string' ? resource.resource_type : null,
+    returnedDeliveryType: typeof resource?.type === 'string' ? resource.type : null,
+    responseFields: resource && typeof resource === 'object' ? Object.keys(resource).sort().slice(0, 40) : [],
+    durationFieldPresent: Boolean(resource && Object.hasOwn(resource, 'duration')),
+    durationFieldType: duration === null ? 'null' : typeof duration,
+    durationSeconds: Number.isFinite(Number(duration)) && duration !== null && duration !== undefined && duration !== '' ? Number(duration) : null,
+    format: typeof resource?.format === 'string' ? resource.format : null,
+    bytes: Number.isFinite(Number(resource?.bytes)) ? Number(resource.bytes) : null,
+  }));
+};
 const isCloudinaryConfigured = () => Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
 const reportMetric = (event, startedAt, bytes, category = 'ok') => {
   const memory = process.memoryUsage();
@@ -221,14 +249,29 @@ const publishUploadedVideo = async (req, res, next) => {
 
     let resource;
     try {
-      resource = await cloudinary.api.resource(session.publicId, { resource_type: 'video', type: 'upload', context: true });
+      // The Node SDK's single-resource adapter accepts resource_type/type for
+      // routing. Its getResourceParams allowlist does not forward `context`,
+      // so don't imply that optional context was actually requested here.
+      resource = await cloudinary.api.resource(session.publicId, { resource_type: 'video', type: 'upload' });
     } catch (providerError) {
+      console.warn('[video-upload] cloudinary-resource-lookup-failed', JSON.stringify({
+        requestedPublicId: session.publicId,
+        requestedResourceType: 'video',
+        requestedDeliveryType: 'upload',
+        uploadSessionId: String(session._id),
+        providerHttpCode: Number.isInteger(providerError?.http_code) ? providerError.http_code : null,
+        providerErrorCode: typeof providerError?.code === 'string' ? providerError.code.slice(0, 80) : null,
+        providerErrorName: typeof providerError?.name === 'string' ? providerError.name.slice(0, 80) : null,
+        providerRequestId: typeof providerError?.request_id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(providerError.request_id) ? providerError.request_id : null,
+        providerMessage: safeProviderMessage(providerError?.message),
+      }));
       reportMetric('metadata-verification-failed', startedAt, session.declaredBytes, providerError.http_code === 404 ? 'asset_not_ready' : 'storage_error');
       if (providerError.http_code === 404) throw httpError(409, 'The video upload has not finished yet. Wait for it to complete, then retry publishing.', 'upload_incomplete');
       const storageError = httpError(502, 'Cloud storage could not verify the video. Retry publishing; your selected file is still available.', 'storage_error');
       storageError.cause = providerError;
       throw storageError;
     }
+    logCloudinaryResourceLookup(session, resource);
     const formats = ALLOWED_MIME_FORMATS[session.mimeType];
     const context = resource.context?.custom || resource.context || {};
     const sourceDuration = readCloudinaryDurationSeconds(resource);

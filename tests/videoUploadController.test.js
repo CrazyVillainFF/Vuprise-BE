@@ -50,6 +50,25 @@ const query = (value) => ({
   then: (resolve, reject) => Promise.resolve(value).then(resolve, reject),
 });
 
+const cloudinaryVideoResource = (publicId, overrides = {}) => ({
+  asset_id: '89d0c6f2e1a7468dadf1a8d2c241b355',
+  public_id: publicId,
+  resource_type: 'video',
+  type: 'upload',
+  format: 'mp4',
+  version: 1728890000,
+  url: `http://res.cloudinary.com/test-cloud/video/upload/v1728890000/${publicId}.mp4`,
+  secure_url: `https://res.cloudinary.com/test-cloud/video/upload/v1728890000/${publicId}.mp4`,
+  bytes: 1000,
+  width: 720,
+  height: 1280,
+  duration: 18.3,
+  created_at: '2026-10-14T03:00:00Z',
+  tags: [],
+  metadata: {},
+  ...overrides,
+});
+
 test('server rejects oversized, invalid-format, invalid-trim and malformed upload requests', () => {
   assert.throws(() => validateSignRequest(validRequest({ fileSize: MAX_VIDEO_BYTES + 1 })), { code: 'file_too_large' });
   assert.throws(() => validateSignRequest(validRequest({ mimeType: 'video/x-matroska' })), { code: 'unsupported_format' });
@@ -139,6 +158,38 @@ test('publish clamps only a browser-reported source EOF to the verified Cloudina
   assert.equal(createdPost.videoDuration, 18);
 });
 
+test('publish reads duration from a realistic Cloudinary video/upload resource response and looks up the session public ID', async () => {
+  const userId = new mongoose.Types.ObjectId();
+  const sessionId = new mongoose.Types.ObjectId();
+  const postId = new mongoose.Types.ObjectId();
+  const session = {
+    _id: sessionId, user: userId, publicId: 'nexora/posts/videos/realistic-resource', status: 'uploading',
+    mimeType: 'video/mp4', declaredBytes: 1000, trimStart: 0, trimEnd: 18.3,
+    clientVideoDuration: 18.3, createdAt: new Date(), authorizationIssuedAt: new Date(),
+    async save() { this.saved = true; },
+  };
+  const populated = { toObject: () => ({ _id: postId, author: { _id: userId } }) };
+  let lookup;
+  let createdPost;
+  VideoUploadSession.findOne = async () => session;
+  Post.findOne = () => query(null);
+  Post.create = async (fields) => { createdPost = fields; return { ...fields, _id: postId }; };
+  Post.findById = () => ({ populate: async () => populated });
+  cloudinary.api.resource = async (...args) => {
+    lookup = args;
+    return cloudinaryVideoResource(session.publicId);
+  };
+  cloudinary.url = (_publicId, options) => `https://res.cloudinary.com/test-cloud/video/upload/${options.transformation[0].start_offset}`;
+
+  const res = response();
+  await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId) } }, res, assert.fail);
+  assert.equal(res.statusCode, 201);
+  assert.equal(lookup[0], session.publicId);
+  assert.deepEqual(lookup[1], { resource_type: 'video', type: 'upload' });
+  assert.equal(createdPost.videoSourceDuration, 18.3);
+  assert.equal(createdPost.videoDuration, 18.3);
+});
+
 test('missing Cloudinary duration for the logged 18.3s browser-EOF case stays retryable and preserves the uploaded source', async () => {
   const userId = new mongoose.Types.ObjectId();
   const sessionId = new mongoose.Types.ObjectId();
@@ -153,9 +204,11 @@ test('missing Cloudinary duration for the logged 18.3s browser-EOF case stays re
   VideoUploadSession.findOne = async () => session;
   Post.findOne = () => query(null);
   Post.create = async () => { postCreated = true; throw new Error('must not publish without provider duration'); };
-  cloudinary.api.resource = async () => ({
-    resource_type: 'video', public_id: session.publicId, format: 'mp4', bytes: 1000, duration: null,
-  });
+  cloudinary.api.resource = async () => {
+    const resource = cloudinaryVideoResource(session.publicId);
+    delete resource.duration;
+    return resource;
+  };
   cloudinary.uploader.destroy = async () => { destroyed = true; };
 
   const res = response();
@@ -320,6 +373,44 @@ test('storage outage and interrupted browser transfer remain retryable', async (
   assert.equal(storageFailure.statusCode, 502);
   assert.equal(storageFailure.body.code, 'storage_error');
   assert.equal(JSON.stringify(storageFailure.body).includes('private provider detail'), false);
+});
+
+test('Cloudinary lookup failure diagnostics include safe provider identifiers without leaking credentials', async () => {
+  const userId = new mongoose.Types.ObjectId();
+  const sessionId = new mongoose.Types.ObjectId();
+  const session = {
+    _id: sessionId, user: userId, publicId: 'nexora/posts/videos/provider-error', status: 'uploading',
+    createdAt: new Date(), authorizationIssuedAt: new Date(), declaredBytes: 1000,
+  };
+  VideoUploadSession.findOne = async () => session;
+  Post.findOne = () => query(null);
+  cloudinary.api.resource = async () => {
+    throw Object.assign(new Error('Cloudinary failure api_secret=do-not-log at https://api.cloudinary.test/private/path'), {
+      http_code: 503, code: 'E_PROVIDER', request_id: 'req-123.safe',
+    });
+  };
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  try {
+    const res = response();
+    await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId) } }, res, assert.fail);
+    assert.equal(res.statusCode, 502);
+    assert.equal(res.body.code, 'storage_error');
+  } finally {
+    console.warn = originalWarn;
+  }
+  const diagnostic = warnings.find(([label]) => label === '[video-upload] cloudinary-resource-lookup-failed');
+  assert.ok(diagnostic);
+  const fields = JSON.parse(diagnostic[1]);
+  assert.equal(fields.requestedPublicId, session.publicId);
+  assert.equal(fields.requestedResourceType, 'video');
+  assert.equal(fields.requestedDeliveryType, 'upload');
+  assert.equal(fields.providerHttpCode, 503);
+  assert.equal(fields.providerErrorCode, 'E_PROVIDER');
+  assert.equal(fields.providerRequestId, 'req-123.safe');
+  assert.equal(JSON.stringify(fields).includes('do-not-log'), false);
+  assert.equal(JSON.stringify(fields).includes('https://'), false);
 });
 
 test('duplicate publish retry returns the existing post without creating a second post', async () => {
