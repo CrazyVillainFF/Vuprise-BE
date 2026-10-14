@@ -6,6 +6,7 @@ const cloudinary = require('../config/cloudinary');
 
 const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
 const MAX_CLIP_SECONDS = 35;
+const TRIM_SLIDER_STEP_SECONDS = 0.05;
 // Browsers and Cloudinary can report container duration with small rounding
 // differences. The clip endpoint naturally clamps a trim at the true EOF.
 const SOURCE_DURATION_TOLERANCE_SECONDS = 0.25;
@@ -42,8 +43,13 @@ const resolveTrimAgainstSource = (sourceDuration, trimStart, requestedTrimEnd, c
   // parser disagreement must not turn that endpoint into an invalid interior
   // trim. Clamp only to Cloudinary's verified EOF; never extend the asset or
   // waive an out-of-range interior trim.
+  // Slider positions are quantized to 50ms. Account only for floating-point
+  // representation noise at that boundary (for example, 18.05 - 18 can be
+  // 0.05000000000000071), not a larger duration mismatch.
+  const browserEofDelta = Math.abs(requestedEnd - browserDuration);
+  const floatingPointSlack = Number.EPSILON * Math.max(1, Math.abs(requestedEnd), Math.abs(browserDuration)) * 4;
   const selectedBrowserEof = Number.isFinite(browserDuration) && browserDuration > 0
-    && Math.abs(requestedEnd - browserDuration) <= 0.05;
+    && browserEofDelta <= TRIM_SLIDER_STEP_SECONDS + floatingPointSlack;
   const withinSource = finite && (endDelta <= SOURCE_DURATION_TOLERANCE_SECONDS || selectedBrowserEof);
   const effectiveEnd = withinSource ? Math.min(requestedEnd, duration) : NaN;
   const clipDuration = effectiveEnd - start;
@@ -236,7 +242,7 @@ const publishUploadedVideo = async (req, res, next) => {
     const effectiveTrimEnd = trimResolution.effectiveEnd;
     const effectiveClipDuration = trimResolution.clipDuration;
     const validDuration = trimResolution.valid;
-    console.info('[video-upload] trim-duration-verification', JSON.stringify({ clientVideoDurationSeconds: Number.isFinite(clientVideoDuration) ? clientVideoDuration : null, cloudinarySourceDurationSeconds: sourceDuration, trimStartSeconds: session.trimStart, requestedTrimEndSeconds: session.trimEnd, effectiveTrimEndSeconds: effectiveTrimEnd, effectiveClipDurationSeconds: effectiveClipDuration, endDeltaSeconds: session.trimEnd - sourceDuration, selectedBrowserEof: Number.isFinite(clientVideoDuration) && Math.abs(session.trimEnd - clientVideoDuration) <= 0.05, sourceDurationToleranceSeconds: SOURCE_DURATION_TOLERANCE_SECONDS, fullSourceUploaded: true, trimAppliedAsDeliveryTransform: true }));
+    console.info('[video-upload] trim-duration-verification', JSON.stringify({ clientVideoDurationSeconds: Number.isFinite(clientVideoDuration) ? clientVideoDuration : null, cloudinarySourceDurationSeconds: sourceDuration, trimStartSeconds: session.trimStart, requestedTrimEndSeconds: session.trimEnd, effectiveTrimEndSeconds: effectiveTrimEnd, effectiveClipDurationSeconds: effectiveClipDuration, endDeltaSeconds: session.trimEnd - sourceDuration, selectedBrowserEof: Number.isFinite(clientVideoDuration) && Math.abs(session.trimEnd - clientVideoDuration) <= TRIM_SLIDER_STEP_SECONDS + Number.EPSILON * Math.max(1, Math.abs(session.trimEnd), Math.abs(clientVideoDuration)) * 4, sourceDurationToleranceSeconds: SOURCE_DURATION_TOLERANCE_SECONDS, fullSourceUploaded: true, trimAppliedAsDeliveryTransform: true }));
     if (resource.resource_type !== 'video' || !isOwned || !validFormat || !Number.isFinite(resourceBytes) || resourceBytes <= 0 || resourceBytes > MAX_VIDEO_BYTES || !validDuration) {
       console.warn('[video-upload] provider-asset-rejected', JSON.stringify({
         resourceTypeValid: resource.resource_type === 'video',

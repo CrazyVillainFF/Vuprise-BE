@@ -70,11 +70,27 @@ test('trim verification accepts an 18-second source ending exactly at browser an
   });
 });
 
+test('trim verification treats a 50ms slider endpoint as browser EOF despite floating-point drift', () => {
+  // 18.05 - 18 evaluates to 0.05000000000000071 in JavaScript. The slider's
+  // final 50ms tick is still an EOF selection; clamp to verified Cloudinary EOF.
+  const result = resolveTrimAgainstSource(17.7, 0, 18, 18.05);
+  assert.equal(result.valid, true);
+  assert.equal(result.effectiveEnd, 17.7);
+  assert.equal(result.clipDuration, 17.7);
+});
+
 test('trim verification clamps a browser EOF to Cloudinary EOF when fractional metadata differs', () => {
   const result = resolveTrimAgainstSource(17.9, 0, 18.375, 18.375);
   assert.equal(result.valid, true);
   assert.equal(result.effectiveEnd, 17.9);
   assert.equal(result.clipDuration, 17.9);
+});
+
+test('trim verification preserves fractional source and trim boundaries', () => {
+  const result = resolveTrimAgainstSource(18.375, 2.125, 18.375, 18.375);
+  assert.equal(result.valid, true);
+  assert.equal(result.effectiveEnd, 18.375);
+  assert.equal(result.clipDuration, 16.25);
 });
 
 test('trim verification accepts an EOF that was refined by a later browser duration event', () => {
