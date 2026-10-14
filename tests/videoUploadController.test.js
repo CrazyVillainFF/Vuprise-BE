@@ -153,13 +153,24 @@ test('publish independently validates ownership, format, size, duration and clip
   assert.equal(deliveredTransforms[0].end_offset, 30);
   assert.equal(deliveredTransforms[1].start_offset, 18);
 
-  for (const invalid of [
-    { ...resource, context: { custom: { user_id: 'someone-else', upload_session: String(sessionId) } } },
-    { ...resource, format: 'avi' },
-    { ...resource, bytes: MAX_VIDEO_BYTES + 1 },
-    { ...resource, duration: 20 },
+  // Container metadata often differs slightly between browser and Cloudinary;
+  // a clip ending within the tolerance should publish instead of being deleted.
+  resource = { ...resource, duration: 29.8 };
+  session.status = 'uploading';
+  destroyed = false;
+  const durationDriftResponse = response();
+  await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId) } }, durationDriftResponse, assert.fail);
+  assert.equal(durationDriftResponse.statusCode, 201);
+  assert.equal(session.status, 'published');
+  assert.equal(destroyed, false);
+
+  for (const [reason, invalid] of [
+    ['forged owner context', { ...resource, context: { custom: { user_id: 'someone-else', upload_session: String(sessionId) } } }],
+    ['unsupported format', { ...resource, format: 'avi' }],
+    ['excessive size', { ...resource, bytes: MAX_VIDEO_BYTES + 1 }],
+    ['too-short source', { ...resource, duration: 20 }],
   ]) {
-    t.test(`rejects provider metadata ${invalid.bytes > MAX_VIDEO_BYTES ? 'with excessive size' : invalid.duration < 30 ? 'with too-short source' : invalid.format !== 'mp4' ? 'with unsupported format' : 'with forged owner context'}`, async () => {
+    t.test(`rejects provider metadata with ${reason}`, async () => {
       resource = invalid;
       session.status = 'uploading';
       destroyed = false;

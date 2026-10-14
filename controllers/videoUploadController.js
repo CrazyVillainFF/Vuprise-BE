@@ -6,6 +6,9 @@ const cloudinary = require('../config/cloudinary');
 
 const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
 const MAX_CLIP_SECONDS = 35;
+// Browsers and Cloudinary can report container duration with small rounding
+// differences. The clip endpoint naturally clamps a trim at the true EOF.
+const SOURCE_DURATION_TOLERANCE_SECONDS = 0.5;
 const SIGNATURE_VALIDITY_MS = 60 * 60 * 1000;
 const CLEANUP_AFTER_MS = 24 * 60 * 60 * 1000;
 const ALLOWED_MIME_FORMATS = Object.freeze({
@@ -183,8 +186,19 @@ const publishUploadedVideo = async (req, res, next) => {
     const resourceBytes = Number(resource.bytes);
     const isOwned = context.user_id === String(req.user._id) && context.upload_session === String(session._id);
     const validFormat = formats?.includes(String(resource.format || '').toLowerCase());
-    const validDuration = Number.isFinite(sourceDuration) && sourceDuration >= session.trimEnd && session.trimEnd - session.trimStart <= MAX_CLIP_SECONDS + 0.001;
+    const validDuration = Number.isFinite(sourceDuration)
+      && sourceDuration + SOURCE_DURATION_TOLERANCE_SECONDS >= session.trimEnd
+      && session.trimEnd - session.trimStart <= MAX_CLIP_SECONDS + 0.001;
     if (resource.resource_type !== 'video' || !isOwned || !validFormat || !Number.isFinite(resourceBytes) || resourceBytes <= 0 || resourceBytes > MAX_VIDEO_BYTES || !validDuration) {
+      console.warn('[video-upload] provider-asset-rejected', JSON.stringify({
+        resourceTypeValid: resource.resource_type === 'video',
+        ownerContextValid: isOwned,
+        formatValid: validFormat,
+        bytesValid: Number.isFinite(resourceBytes) && resourceBytes > 0 && resourceBytes <= MAX_VIDEO_BYTES,
+        durationValid: validDuration,
+        sourceDuration,
+        requestedClipEnd: session.trimEnd,
+      }));
       session.status = 'rejected';
       await session.save();
       await cloudinary.uploader.destroy(session.publicId, { resource_type: 'video', invalidate: true }).catch(() => {});
