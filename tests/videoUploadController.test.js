@@ -77,6 +77,13 @@ test('trim verification clamps a browser EOF to Cloudinary EOF when fractional m
   assert.equal(result.clipDuration, 17.9);
 });
 
+test('trim verification accepts an EOF that was refined by a later browser duration event', () => {
+  const result = resolveTrimAgainstSource(17.6, 0, 18.42, 18.42);
+  assert.equal(result.valid, true);
+  assert.equal(result.effectiveEnd, 17.6);
+  assert.equal(result.clipDuration, 17.6);
+});
+
 test('trim verification rejects an end genuinely outside the source tolerance', () => {
   const result = resolveTrimAgainstSource(18, 0, 18.6, 20);
   assert.equal(result.valid, false);
