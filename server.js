@@ -236,7 +236,10 @@ app.get('/api/health', (req, res) => {
     status: 'online',
     timestamp: new Date().toISOString(),
     service: 'Vuprise Professional Networking API',
-    version: '1.0.0'
+    version: '1.0.0',
+    commit: /^[0-9a-f]{40}$/i.test(process.env.RENDER_GIT_COMMIT || '')
+      ? process.env.RENDER_GIT_COMMIT
+      : null,
   });
 });
 
