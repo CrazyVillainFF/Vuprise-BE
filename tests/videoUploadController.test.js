@@ -185,7 +185,7 @@ test('publish reads duration from a realistic Cloudinary video/upload resource r
   await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId) } }, res, assert.fail);
   assert.equal(res.statusCode, 201);
   assert.equal(lookup[0], session.publicId);
-  assert.deepEqual(lookup[1], { resource_type: 'video', type: 'upload' });
+  assert.deepEqual(lookup[1], { resource_type: 'video', type: 'upload', media_metadata: true });
   assert.equal(createdPost.videoSourceDuration, 18.3);
   assert.equal(createdPost.videoDuration, 18.3);
 });
@@ -201,10 +201,12 @@ test('missing Cloudinary duration for the logged 18.3s browser-EOF case stays re
   };
   let destroyed = false;
   let postCreated = false;
+  let lookupCount = 0;
   VideoUploadSession.findOne = async () => session;
   Post.findOne = () => query(null);
   Post.create = async () => { postCreated = true; throw new Error('must not publish without provider duration'); };
   cloudinary.api.resource = async () => {
+    lookupCount += 1;
     const resource = cloudinaryVideoResource(session.publicId);
     delete resource.duration;
     return resource;
@@ -212,13 +214,22 @@ test('missing Cloudinary duration for the logged 18.3s browser-EOF case stays re
   cloudinary.uploader.destroy = async () => { destroyed = true; };
 
   const res = response();
-  await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId), clientVideoDuration: 18.3 } }, res, assert.fail);
+  const originalWarn = console.warn;
+  const warnings = [];
+  console.warn = (...args) => warnings.push(args);
+  try {
+    await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId), clientVideoDuration: 18.3 } }, res, assert.fail);
+  } finally {
+    console.warn = originalWarn;
+  }
   assert.equal(res.statusCode, 503);
   assert.equal(res.body.code, 'duration_metadata_unavailable');
   assert.match(res.body.message, /retry publishing shortly/i);
   assert.equal(session.status, 'uploading');
   assert.equal(destroyed, false);
   assert.equal(postCreated, false);
+  assert.equal(lookupCount, 3);
+  assert.ok(warnings.some(([label]) => label === '[video-upload] cloudinary-resource-lookup-duration-unavailable'));
 });
 
 test('unauthorized callers cannot receive a signed upload authorization', async () => {
@@ -358,14 +369,20 @@ test('storage outage and interrupted browser transfer remain retryable', async (
   const userId = new mongoose.Types.ObjectId();
   const sessionId = new mongoose.Types.ObjectId();
   const session = { _id: sessionId, user: userId, publicId: 'nexora/posts/videos/pending', status: 'uploading', createdAt: new Date(), authorizationIssuedAt: new Date(), declaredBytes: 1000 };
+  let notFoundLookups = 0;
+  let destroyed = false;
   VideoUploadSession.findOne = async () => session;
   Post.findOne = () => query(null);
-  cloudinary.api.resource = async () => { throw Object.assign(new Error('private provider detail'), { http_code: 404 }); };
+  cloudinary.api.resource = async () => { notFoundLookups += 1; throw Object.assign(new Error('private provider detail'), { http_code: 404 }); };
+  cloudinary.uploader.destroy = async () => { destroyed = true; };
   const res = response();
   await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId) } }, res, assert.fail);
   assert.equal(res.statusCode, 409);
   assert.equal(res.body.code, 'upload_incomplete');
   assert.equal(JSON.stringify(res.body).includes('private provider detail'), false);
+  assert.equal(notFoundLookups, 3);
+  assert.equal(session.status, 'uploading');
+  assert.equal(destroyed, false);
 
   cloudinary.api.resource = async () => { throw Object.assign(new Error('private provider detail'), { http_code: 503 }); };
   const storageFailure = response();

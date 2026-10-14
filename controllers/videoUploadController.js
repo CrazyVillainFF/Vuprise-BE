@@ -10,6 +10,8 @@ const TRIM_SLIDER_STEP_SECONDS = 0.05;
 // Browsers and Cloudinary can report container duration with small rounding
 // differences. The clip endpoint naturally clamps a trim at the true EOF.
 const SOURCE_DURATION_TOLERANCE_SECONDS = 0.25;
+const CLOUDINARY_METADATA_LOOKUP_MAX_ATTEMPTS = 3;
+const CLOUDINARY_METADATA_RETRY_DELAYS_MS = [150, 350];
 const SIGNATURE_VALIDITY_MS = 60 * 60 * 1000;
 const CLEANUP_AFTER_MS = 24 * 60 * 60 * 1000;
 const ALLOWED_MIME_FORMATS = Object.freeze({
@@ -36,12 +38,15 @@ const safeProviderMessage = (value) => {
     .replace(/\b[A-Za-z0-9_-]{40,}\b/g, '[redacted]')
     .slice(0, 180);
 };
-const logCloudinaryResourceLookup = (session, resource) => {
+const logCloudinaryResourceLookup = (session, resource, attempt) => {
   const duration = resource?.duration;
   console.info('[video-upload] cloudinary-resource-lookup', JSON.stringify({
+    attempt,
+    maxAttempts: CLOUDINARY_METADATA_LOOKUP_MAX_ATTEMPTS,
     requestedPublicId: session.publicId,
     requestedResourceType: 'video',
     requestedDeliveryType: 'upload',
+    mediaMetadataRequested: true,
     uploadSessionId: String(session._id),
     resourceReturned: Boolean(resource),
     returnedPublicId: typeof resource?.public_id === 'string' ? resource.public_id : null,
@@ -248,39 +253,73 @@ const publishUploadedVideo = async (req, res, next) => {
     }
 
     let resource;
-    try {
-      // The Node SDK's single-resource adapter accepts resource_type/type for
-      // routing. Its getResourceParams allowlist does not forward `context`,
-      // so don't imply that optional context was actually requested here.
-      resource = await cloudinary.api.resource(session.publicId, { resource_type: 'video', type: 'upload' });
-    } catch (providerError) {
-      console.warn('[video-upload] cloudinary-resource-lookup-failed', JSON.stringify({
-        requestedPublicId: session.publicId,
-        requestedResourceType: 'video',
-        requestedDeliveryType: 'upload',
-        uploadSessionId: String(session._id),
-        providerHttpCode: Number.isInteger(providerError?.http_code) ? providerError.http_code : null,
-        providerErrorCode: typeof providerError?.code === 'string' ? providerError.code.slice(0, 80) : null,
-        providerErrorName: typeof providerError?.name === 'string' ? providerError.name.slice(0, 80) : null,
-        providerRequestId: typeof providerError?.request_id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(providerError.request_id) ? providerError.request_id : null,
-        providerMessage: safeProviderMessage(providerError?.message),
-      }));
-      reportMetric('metadata-verification-failed', startedAt, session.declaredBytes, providerError.http_code === 404 ? 'asset_not_ready' : 'storage_error');
+    let providerError;
+    let sourceDuration = NaN;
+    for (let attempt = 1; attempt <= CLOUDINARY_METADATA_LOOKUP_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        // Cloudinary omits duration from the ordinary resource response.
+        // Request media metadata so the verified top-level duration is returned.
+        resource = await cloudinary.api.resource(session.publicId, {
+          resource_type: 'video',
+          type: 'upload',
+          media_metadata: true,
+        });
+        providerError = undefined;
+        logCloudinaryResourceLookup(session, resource, attempt);
+        sourceDuration = readCloudinaryDurationSeconds(resource);
+        if (Number.isFinite(sourceDuration) || attempt === CLOUDINARY_METADATA_LOOKUP_MAX_ATTEMPTS) break;
+      } catch (error) {
+        providerError = error;
+        const retryableProviderStatus = error?.http_code === 404 || error?.http_code === 429 || error?.http_code >= 500;
+        const retryPlanned = retryableProviderStatus && attempt < CLOUDINARY_METADATA_LOOKUP_MAX_ATTEMPTS;
+        console.warn('[video-upload] cloudinary-resource-lookup-failed', JSON.stringify({
+          attempt,
+          maxAttempts: CLOUDINARY_METADATA_LOOKUP_MAX_ATTEMPTS,
+          retryPlanned,
+          requestedPublicId: session.publicId,
+          requestedResourceType: 'video',
+          requestedDeliveryType: 'upload',
+          mediaMetadataRequested: true,
+          uploadSessionId: String(session._id),
+          providerHttpCode: Number.isInteger(error?.http_code) ? error.http_code : null,
+          providerErrorCode: typeof error?.code === 'string' ? error.code.slice(0, 80) : null,
+          providerErrorName: typeof error?.name === 'string' ? error.name.slice(0, 80) : null,
+          providerRequestId: typeof error?.request_id === 'string' && /^[A-Za-z0-9._:-]{1,128}$/.test(error.request_id) ? error.request_id : null,
+          providerMessage: safeProviderMessage(error?.message),
+        }));
+        reportMetric('metadata-verification-failed', startedAt, session.declaredBytes, error.http_code === 404 ? 'asset_not_ready' : 'storage_error');
+        if (!retryPlanned) break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, CLOUDINARY_METADATA_RETRY_DELAYS_MS[attempt - 1] || 350));
+    }
+    if (providerError) {
       if (providerError.http_code === 404) throw httpError(409, 'The video upload has not finished yet. Wait for it to complete, then retry publishing.', 'upload_incomplete');
       const storageError = httpError(502, 'Cloud storage could not verify the video. Retry publishing; your selected file is still available.', 'storage_error');
       storageError.cause = providerError;
       throw storageError;
     }
-    logCloudinaryResourceLookup(session, resource);
     const formats = ALLOWED_MIME_FORMATS[session.mimeType];
     const context = resource.context?.custom || resource.context || {};
-    const sourceDuration = readCloudinaryDurationSeconds(resource);
+    sourceDuration = readCloudinaryDurationSeconds(resource);
     if (!Number.isFinite(sourceDuration)) {
       // A missing provider duration is not evidence of an invalid user trim.
       // Keep the verified source asset and upload session so a retry can
       // re-query Cloudinary once its metadata is available.
       reportMetric('duration-metadata-unavailable', startedAt, session.declaredBytes, 'metadata_incomplete');
+      console.warn('[video-upload] cloudinary-resource-lookup-duration-unavailable', JSON.stringify({
+        requestedPublicId: session.publicId,
+        returnedPublicId: typeof resource?.public_id === 'string' ? resource.public_id : null,
+        publicIdMatches: resource?.public_id === session.publicId,
+        returnedResourceType: typeof resource?.resource_type === 'string' ? resource.resource_type : null,
+        returnedDeliveryType: typeof resource?.type === 'string' ? resource.type : null,
+        responseFields: resource && typeof resource === 'object' ? Object.keys(resource).sort().slice(0, 40) : [],
+        mediaMetadataRequested: true,
+        durationFieldPresent: Boolean(resource && Object.hasOwn(resource, 'duration')),
+        durationFieldType: resource?.duration === null ? 'null' : typeof resource?.duration,
+      }));
       console.warn('[video-upload] duration-metadata-unavailable', JSON.stringify({
+        attempts: CLOUDINARY_METADATA_LOOKUP_MAX_ATTEMPTS,
         resourceReturned: Boolean(resource),
         durationFieldPresent: Boolean(resource && Object.hasOwn(resource, 'duration')),
         durationFieldType: resource?.duration === null ? 'null' : typeof resource?.duration,
