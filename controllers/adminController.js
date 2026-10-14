@@ -466,7 +466,7 @@ const listInbox = (type) => async (req, res, next) => {
       ];
     } else if (['pending', 'under_review', 'approved', 'rejected', 'resolved'].includes(req.query.status)) filter.status = req.query.status;
     const [requests, total] = await Promise.all([
-      SupportRequest.find(filter).select('-__v').populate('user', 'name email moderationStatus moderationExpiresAt moderationReason').populate('reportedUser', 'name email moderationStatus moderationExpiresAt').populate('reportedPost', 'author content image mediaType videoUrl createdAt').populate({ path: 'reportedMessage', select: '_id sender createdAt' }).populate('adminNotes.admin', 'name email').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      SupportRequest.find(filter).select('-__v').populate('user', 'name email moderationStatus moderationExpiresAt moderationReason').populate('reportedUser', 'name email moderationStatus moderationExpiresAt').populate('reportedPost', 'author content image mediaType videoUrl createdAt').populate('reportedComment', 'author content post createdAt').populate({ path: 'reportedMessage', select: '_id sender createdAt' }).populate('adminNotes.admin', 'name email').sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
       SupportRequest.countDocuments(filter)
     ]);
     const normalizedRequests = type === 'report' ? requests.map((request) => request.status === 'pending' && request.replySentAt ? { ...request, status: 'resolved' } : request) : requests;

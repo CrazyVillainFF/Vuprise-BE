@@ -4,7 +4,9 @@ const {
   addComment,
   getPostComments,
   deleteComment,
-  updateComment
+  updateComment,
+  toggleCommentLike,
+  toggleCommentPin
 } = require('../controllers/commentController');
 const { protect, optionalAuth } = require('../middleware/authMiddleware');
 
@@ -14,6 +16,8 @@ router.get('/:postId/comments', optionalAuth, getPostComments);
 
 // Standalone comment deletion
 router.put('/:id', protect, updateComment);
+router.put('/:id/like', protect, toggleCommentLike);
+router.put('/:id/pin', protect, toggleCommentPin);
 router.delete('/:id', protect, deleteComment);
 
 module.exports = router;

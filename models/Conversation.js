@@ -3,6 +3,10 @@ const mongoose = require('mongoose');
 const ConversationSchema = new mongoose.Schema({
   pairKey: { type: String, required: true, unique: true, index: true },
   participants: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }],
+  // Records who opened a non-mutual conversation. This lets the permission
+  // layer distinguish a public account's allowed inbound request from a
+  // private account that chose to start the conversation itself.
+  initiatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null, index: true },
   hiddenFor: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   displayNames: [{
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },

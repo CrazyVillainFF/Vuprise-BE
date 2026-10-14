@@ -2,9 +2,20 @@ const Post = require('../models/Post');
 const Comment = require('../models/Comment');
 const Notification = require('../models/Notification');
 const User = require('../models/User');
+const Connection = require('../models/Connection');
 const fs = require('fs/promises');
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
 const { canViewUserPosts, isBlockedBy, postVisibilityFilter, addPostVisibility } = require('../utils/postVisibility');
+const { connectionStatusesForViewer } = require('../utils/connectionStatus');
+
+const getViewerConnectionStatuses = async (viewerId) => {
+  if (!viewerId) return {};
+  const connections = await Connection.find({
+    status: { $in: ['accepted', 'pending'] },
+    $or: [{ requester: viewerId }, { recipient: viewerId }],
+  }).select('requester recipient status');
+  return connectionStatusesForViewer(connections, viewerId);
+};
 
 const savePostMedia = async (file, req, body = {}) => {
   if (!file) return null;
@@ -116,12 +127,16 @@ const getFeed = async (req, res, next) => {
       .skip(skip)
       .limit(limit);
 
-    // Add isLiked status relative to authenticated user
+    const connectionStatuses = await getViewerConnectionStatuses(req.user?._id);
+
+    // Add viewer-specific interaction and connection state in the same response.
     const formattedPosts = posts.map(p => {
       const pObj = p.toObject();
       pObj.likeCount = p.likes ? p.likes.length : 0;
       pObj.commentCount = p.comments ? p.comments.length : 0;
       pObj.isLiked = req.user ? p.likes.some(id => id.toString() === req.user._id.toString()) : false;
+      const authorId = String(pObj.author?._id || pObj.author || '');
+      pObj.connectionStatus = req.user && authorId === String(req.user._id) ? 'self' : (connectionStatuses[authorId] || 'none');
       return pObj;
     });
 
@@ -221,9 +236,12 @@ const getPostById = async (req, res, next) => {
     }
 
     const pObj = post.toObject();
+    const connectionStatuses = await getViewerConnectionStatuses(req.user?._id);
     pObj.likeCount = post.likes ? post.likes.length : 0;
     pObj.commentCount = post.comments ? post.comments.length : 0;
     pObj.isLiked = req.user ? post.likes.some(id => id.toString() === req.user._id.toString()) : false;
+    const authorId = String(pObj.author?._id || pObj.author || '');
+    pObj.connectionStatus = req.user && authorId === String(req.user._id) ? 'self' : (connectionStatuses[authorId] || 'none');
 
     res.status(200).json({
       success: true,

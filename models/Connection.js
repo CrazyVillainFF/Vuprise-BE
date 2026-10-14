@@ -34,5 +34,7 @@ ConnectionSchema.pre('validate', function addPairKey(next) {
 // Canonical key prevents simultaneous requests in opposite directions.
 ConnectionSchema.index({ requester: 1, recipient: 1 }, { unique: true });
 ConnectionSchema.index({ pairKey: 1 }, { unique: true, partialFilterExpression: { pairKey: { $type: 'string' } } });
+ConnectionSchema.index({ requester: 1, status: 1, createdAt: -1 });
+ConnectionSchema.index({ recipient: 1, status: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Connection', ConnectionSchema);

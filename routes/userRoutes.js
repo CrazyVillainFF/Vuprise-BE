@@ -4,6 +4,7 @@ const {
   getUsers,
   getSuggestedUsers,
   getUserById,
+  getProfileRelationshipList,
   updateProfile,
   uploadAvatar,
   uploadCover,
@@ -26,6 +27,7 @@ router.put('/profile', protect, updateProfile);
 router.post('/avatar', protect, upload.single('avatar'), validateImageContent, uploadAvatar);
 router.post('/cover', protect, upload.single('cover'), validateImageContent, uploadCover);
 router.put('/settings', protect, updateSettings);
+router.get('/:id/relationships/:kind', protect, getProfileRelationshipList);
 router.get('/:id', optionalAuth, getUserById);
 
 module.exports = router;

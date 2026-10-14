@@ -27,7 +27,7 @@ function consumeRateLimit(key, now = Date.now()) {
 
 const createRequest = async (req, res, next) => {
   try {
-    const { type, email, subject, message, category = '', userId = '', reportedUser = '', reportedPost = '', reportedMessage = '', reportedMessageScope = '', reportedThreadId = '', evidenceUrls = [], website = '' } = req.body || {};
+    const { type, email, subject, message, category = '', userId = '', reportedUser = '', reportedPost = '', reportedComment = '', reportedMessage = '', reportedMessageScope = '', reportedThreadId = '', evidenceUrls = [], website = '' } = req.body || {};
     const evidenceFiles = req.files || [];
     if (website) { await removeTemporaryEvidence(evidenceFiles); return res.status(202).json({ success: true, message: 'Your request has been received.' }); }
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
@@ -37,7 +37,7 @@ const createRequest = async (req, res, next) => {
       typeof message !== 'string' || message.trim().length < 10 || message.trim().length > 5000 ||
       typeof category !== 'string' || category.length > 80 ||
       (userId && !/^[a-f\d]{24}$/i.test(userId)) || (reportedUser && !/^[a-f\d]{24}$/i.test(reportedUser)) ||
-      (reportedPost && !/^[a-f\d]{24}$/i.test(reportedPost)) ||
+      (reportedPost && !/^[a-f\d]{24}$/i.test(reportedPost)) || (reportedComment && !/^[a-f\d]{24}$/i.test(reportedComment)) ||
       (reportedMessage && !/^[a-f\d]{24}$/i.test(reportedMessage)) ||
       (reportedThreadId && !/^[a-f\d]{24}$/i.test(reportedThreadId)) ||
       (reportedMessage && !['direct', 'group'].includes(reportedMessageScope)) ||
@@ -64,9 +64,10 @@ const createRequest = async (req, res, next) => {
 
     const validId = (value) => typeof value === 'string' && /^[a-f\d]{24}$/i.test(value);
     if (type === 'report') {
-      if (!validId(reportedUser) && !validId(reportedPost) && !validId(reportedMessage)) { await removeTemporaryEvidence(evidenceFiles); return res.status(400).json({ success: false, message: 'Choose the reported account, post, or message.' }); }
+      if (!validId(reportedUser) && !validId(reportedPost) && !validId(reportedComment) && !validId(reportedMessage)) { await removeTemporaryEvidence(evidenceFiles); return res.status(400).json({ success: false, message: 'Choose the reported account, post, comment, or message.' }); }
       if (validId(reportedUser) && !(await User.exists({ _id: reportedUser, moderationStatus: { $ne: 'deleted' } }))) { await removeTemporaryEvidence(evidenceFiles); return res.status(404).json({ success: false, message: 'Reported account not found.' }); }
       if (validId(reportedPost) && !(await require('../models/Post').exists({ _id: reportedPost }))) { await removeTemporaryEvidence(evidenceFiles); return res.status(404).json({ success: false, message: 'Reported post not found.' }); }
+      if (validId(reportedComment) && !(await require('../models/Comment').exists({ _id: reportedComment }))) { await removeTemporaryEvidence(evidenceFiles); return res.status(404).json({ success: false, message: 'Reported comment not found.' }); }
       if (validId(reportedMessage)) {
         if (!req.user || String(req.user.email).toLowerCase() !== normalizedEmail) { await removeTemporaryEvidence(evidenceFiles); return res.status(401).json({ success: false, message: 'Sign in with your account email to report a message.' }); }
         if (reportedMessageScope === 'direct') {
@@ -90,6 +91,7 @@ const createRequest = async (req, res, next) => {
       subject: subject.trim(), message: message.trim(), category: category.trim(),
       reportedUser: type === 'report' && validId(reportedUser) ? reportedUser : null,
       reportedPost: type === 'report' && validId(reportedPost) ? reportedPost : null,
+      reportedComment: type === 'report' && validId(reportedComment) ? reportedComment : null,
       reportedMessage: type === 'report' && validId(reportedMessage) ? reportedMessage : null,
       reportedMessageScope: type === 'report' && validId(reportedMessage) ? reportedMessageScope : undefined,
       reportedMessageModel: type === 'report' && validId(reportedMessage) ? (reportedMessageScope === 'direct' ? 'DirectMessage' : 'GroupMessage') : undefined,

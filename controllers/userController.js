@@ -128,14 +128,14 @@ const getSuggestedUsers = async (req, res, next) => {
     const suggested = await User.find({
       _id: { $nin: excludedIds }
     })
-      .select('email name headline profilePicture company jobTitle location skills connections isVerifiedAccount')
+      .select('email name headline profilePicture company jobTitle location skills connections isVerifiedAccount verificationBadgeColor')
       .limit(6);
 
     const suggestedUsers = suggested.map((entry) => {
       const user = entry.toObject();
       const isVerified = isVerifiedAccount(user);
       delete user.email;
-      return { ...user, isVerifiedAccount: isVerified };
+      return { ...user, isVerifiedAccount: isVerified, verificationBadgeColor: user.verificationBadgeColor || 'blue' };
     });
 
     res.status(200).json({
@@ -153,10 +153,7 @@ const getSuggestedUsers = async (req, res, next) => {
 const getUserById = async (req, res, next) => {
   try {
     const user = await User.findById(req.params.id)
-      .select('-password')
-      .populate('connections', 'name headline profilePicture company jobTitle isVerifiedAccount')
-      .populate('followers', 'name headline profilePicture isVerifiedAccount')
-      .populate('following', 'name headline profilePicture isVerifiedAccount');
+      .select('-password');
 
     if (!user) {
       return res.status(404).json({
@@ -167,6 +164,11 @@ const getUserById = async (req, res, next) => {
 
     const userObj = user.toObject();
     userObj.isVerifiedAccount = isVerifiedAccount(userObj);
+    // Relationship identities are supplied through the privacy-aware endpoint
+    // below. Never leak the raw arrays through a profile response.
+    delete userObj.connections;
+    delete userObj.followers;
+    delete userObj.following;
 
     // Check connection status if requester is authenticated
     if (req.user) {
@@ -203,8 +205,24 @@ const getUserById = async (req, res, next) => {
     }
 
     // Get user's recent posts count
-    const postCount = await Post.countDocuments({ author: user._id });
+    const [postCount, connectsCount, connectionsCount] = await Promise.all([
+      Post.countDocuments({ author: user._id }),
+      // "Connects" is the people connected to this profile: every mutual
+      // connection plus requests awaiting this profile owner's connect-back.
+      Connection.countDocuments({
+        $or: [
+          { recipient: user._id, status: 'pending' },
+          { status: 'accepted', $or: [{ requester: user._id }, { recipient: user._id }] }
+        ]
+      }),
+      Connection.countDocuments({
+        status: 'accepted',
+        $or: [{ requester: user._id }, { recipient: user._id }]
+      })
+    ]);
     userObj.postCount = postCount;
+    userObj.connectsCount = connectsCount;
+    userObj.connectionsCount = connectionsCount;
 
     res.status(200).json({
       success: true,
@@ -213,6 +231,53 @@ const getUserById = async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+};
+
+// @desc    Get privacy-aware profile relationship list
+// @route   GET /api/users/:id/relationships/:kind
+// @access  Private
+const getProfileRelationshipList = async (req, res, next) => {
+  try {
+    const { id, kind } = req.params;
+    if (!mongoose.isValidObjectId(id) || !['connects', 'connections'].includes(kind)) {
+      return res.status(400).json({ success: false, message: 'Choose a valid relationship list.' });
+    }
+    const profile = await User.findById(id).select('privateAccount');
+    if (!profile) return res.status(404).json({ success: false, message: 'User profile not found.' });
+    const isOwner = String(req.user._id) === String(profile._id);
+    if (profile.privateAccount && !isOwner) {
+      return res.status(403).json({ success: false, message: 'This member keeps relationship lists private.' });
+    }
+
+    const filter = kind === 'connects'
+      ? {
+        $or: [
+          { recipient: profile._id, status: 'pending' },
+          { status: 'accepted', $or: [{ requester: profile._id }, { recipient: profile._id }] }
+        ]
+      }
+      : { status: 'accepted', $or: [{ requester: profile._id }, { recipient: profile._id }] };
+    const relationships = await Connection.find(filter)
+      .select('requester recipient status createdAt')
+      .populate('requester', 'name headline profilePicture isVerifiedAccount verificationBadgeColor')
+      .populate('recipient', 'name headline profilePicture isVerifiedAccount verificationBadgeColor')
+      .sort({ createdAt: -1 })
+      .lean();
+    const users = relationships.map((relationship) => {
+      const other = relationship.status === 'pending'
+        ? relationship.requester
+        : (String(relationship.requester?._id) === String(profile._id) ? relationship.recipient : relationship.requester);
+      return {
+        ...other,
+        isVerifiedAccount: isVerifiedAccount(other),
+        connectionId: relationship._id,
+        relationshipStatus: relationship.status,
+        connectedAt: relationship.createdAt
+      };
+    });
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ success: true, kind, users, count: users.length, privateAccount: Boolean(profile.privateAccount) });
+  } catch (error) { next(error); }
 };
 
 // @desc    Update user profile
@@ -386,8 +451,15 @@ const searchUsers = async (req, res, next) => {
         { location: regex }
       ]
     })
-      .select('name headline profilePicture company jobTitle location skills isVerifiedAccount')
+      .select('name headline profilePicture company jobTitle location skills isVerifiedAccount verificationBadgeColor email')
       .limit(10);
+
+    const verifiedUsers = users.map((user) => {
+      const entry = typeof user.toObject === 'function' ? user.toObject() : user;
+      const result = { ...entry, isVerifiedAccount: isVerifiedAccount(entry), verificationBadgeColor: entry.verificationBadgeColor || 'blue' };
+      delete result.email;
+      return result;
+    });
 
     let postQuery = {
       content: regex
@@ -395,13 +467,13 @@ const searchUsers = async (req, res, next) => {
     postQuery = addPostVisibility(postQuery, await postVisibilityFilter(req.user?._id));
 
     const posts = await Post.find(postQuery)
-      .populate('author', 'name headline profilePicture')
+      .populate('author', 'name headline profilePicture isVerifiedAccount verificationBadgeColor')
       .sort({ createdAt: -1 })
       .limit(6);
 
     res.status(200).json({
       success: true,
-      users,
+      users: verifiedUsers,
       posts
     });
   } catch (error) {
@@ -508,6 +580,7 @@ module.exports = {
   getUsers,
   getSuggestedUsers,
   getUserById,
+  getProfileRelationshipList,
   updateProfile,
   uploadAvatar,
   uploadCover,

@@ -21,13 +21,23 @@ const CommentSchema = new mongoose.Schema({
   likes: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
-  }]
+  }],
+  pinned: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  pinnedAt: {
+    type: Date,
+    default: null
+  }
 }, {
   timestamps: true,
   toJSON: { virtuals: true },
   toObject: { virtuals: true }
 });
 
-CommentSchema.index({ post: 1, createdAt: 1 });
+CommentSchema.index({ post: 1, pinned: -1, createdAt: -1 });
+CommentSchema.index({ author: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Comment', CommentSchema);

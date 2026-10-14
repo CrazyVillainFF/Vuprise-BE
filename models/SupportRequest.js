@@ -15,6 +15,7 @@ const SupportRequestSchema = new mongoose.Schema({
   category: { type: String, trim: true, maxlength: 80, default: '' },
   reportedUser: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   reportedPost: { type: mongoose.Schema.Types.ObjectId, ref: 'Post', default: null },
+  reportedComment: { type: mongoose.Schema.Types.ObjectId, ref: 'Comment', default: null },
   reportedMessage: { type: mongoose.Schema.Types.ObjectId, refPath: 'reportedMessageModel', default: null },
   reportedMessageModel: { type: String, enum: ['DirectMessage', 'GroupMessage'], default: undefined },
   reportedMessageScope: { type: String, enum: ['direct', 'group'], default: undefined },
@@ -34,6 +35,7 @@ SupportRequestSchema.index({ type: 1, status: 1, createdAt: -1 });
 SupportRequestSchema.index({ email: 1, createdAt: -1 });
 SupportRequestSchema.index({ reportedUser: 1, createdAt: -1 });
 SupportRequestSchema.index({ reportedPost: 1, createdAt: -1 });
+SupportRequestSchema.index({ reportedComment: 1, createdAt: -1 });
 SupportRequestSchema.index({ reportedMessage: 1, createdAt: -1 });
 
 module.exports = mongoose.model('SupportRequest', SupportRequestSchema);

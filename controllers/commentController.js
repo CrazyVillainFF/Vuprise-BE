@@ -3,6 +3,20 @@ const Post = require('../models/Post');
 const Notification = require('../models/Notification');
 const { canViewUserPosts } = require('../utils/postVisibility');
 
+const authorFields = 'name headline profilePicture company jobTitle isVerifiedAccount verificationBadgeColor';
+const sameId = (left, right) => String(left) === String(right);
+
+const serializeComment = (comment, viewerId) => {
+  const value = comment.toObject ? comment.toObject() : comment;
+  const likes = Array.isArray(value.likes) ? value.likes : [];
+  return {
+    ...value,
+    likeCount: likes.length,
+    isLiked: Boolean(viewerId && likes.some((id) => sameId(id?._id || id, viewerId))),
+    likes: undefined
+  };
+};
+
 // @desc    Add comment to a post
 // @route   POST /api/posts/:postId/comments
 // @access  Private
@@ -41,7 +55,7 @@ const addComment = async (req, res, next) => {
     await post.save();
 
     const populatedComment = await Comment.findById(comment._id)
-      .populate('author', 'name headline profilePicture company jobTitle');
+      .populate('author', authorFields);
 
     // Create notification if commenter is not post author
     if (post.author.toString() !== req.user._id.toString()) {
@@ -57,7 +71,7 @@ const addComment = async (req, res, next) => {
     res.status(201).json({
       success: true,
       message: 'Comment added successfully.',
-      comment: populatedComment,
+      comment: serializeComment(populatedComment, req.user._id),
       commentCount: post.comments.length
     });
   } catch (error) {
@@ -80,13 +94,15 @@ const getPostComments = async (req, res, next) => {
     }
 
     const comments = await Comment.find({ post: postId })
-      .populate('author', 'name headline profilePicture company jobTitle')
-      .sort({ createdAt: 1 });
+      .select('author content likes pinned pinnedAt createdAt updatedAt')
+      .populate('author', authorFields)
+      .sort({ pinned: -1, createdAt: -1 })
+      .lean();
 
     res.status(200).json({
       success: true,
       count: comments.length,
-      comments
+      comments: comments.map((comment) => serializeComment(comment, req.user?._id))
     });
   } catch (error) {
     next(error);
@@ -156,17 +172,59 @@ const updateComment = async (req, res, next) => {
     comment.content = content;
     await comment.save();
     const updatedComment = await Comment.findById(comment._id)
-      .populate('author', 'name headline profilePicture company jobTitle');
+      .populate('author', authorFields);
 
-    res.status(200).json({ success: true, message: 'Comment updated successfully.', comment: updatedComment });
+    res.status(200).json({ success: true, message: 'Comment updated successfully.', comment: serializeComment(updatedComment, req.user._id) });
   } catch (error) {
     next(error);
   }
+};
+
+// @desc    Like or unlike a comment
+// @route   PUT /api/comments/:id/like
+const toggleCommentLike = async (req, res, next) => {
+  try {
+    const comment = await Comment.findById(req.params.id).select('post author likes');
+    if (!comment) return res.status(404).json({ success: false, message: 'Comment not found.' });
+    const post = await Post.findById(comment.post).select('author');
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found.' });
+    const postAuthor = await require('../models/User').findById(post.author).select('privateAccount _id');
+    if (!(await canViewUserPosts(req.user._id, postAuthor))) return res.status(403).json({ success: false, privateAccount: true, message: 'This account is private.' });
+
+    const existing = comment.likes.findIndex((id) => sameId(id, req.user._id));
+    const liked = existing === -1;
+    if (liked) comment.likes.push(req.user._id);
+    else comment.likes.splice(existing, 1);
+    await comment.save();
+    return res.status(200).json({ success: true, liked, likeCount: comment.likes.length });
+  } catch (error) { return next(error); }
+};
+
+// @desc    Pin or unpin a comment (post author only)
+// @route   PUT /api/comments/:id/pin
+const toggleCommentPin = async (req, res, next) => {
+  try {
+    const comment = await Comment.findById(req.params.id);
+    if (!comment) return res.status(404).json({ success: false, message: 'Comment not found.' });
+    const post = await Post.findById(comment.post).select('author');
+    if (!post) return res.status(404).json({ success: false, message: 'Post not found.' });
+    if (!sameId(post.author, req.user._id)) return res.status(403).json({ success: false, message: 'Only the post author can pin a comment.' });
+
+    const pinned = !comment.pinned;
+    if (pinned) await Comment.updateMany({ post: comment.post, pinned: true }, { $set: { pinned: false, pinnedAt: null } });
+    comment.pinned = pinned;
+    comment.pinnedAt = pinned ? new Date() : null;
+    await comment.save();
+    const populated = await Comment.findById(comment._id).populate('author', authorFields);
+    return res.status(200).json({ success: true, pinned, comment: serializeComment(populated, req.user._id) });
+  } catch (error) { return next(error); }
 };
 
 module.exports = {
   addComment,
   getPostComments,
   deleteComment,
-  updateComment
+  updateComment,
+  toggleCommentLike,
+  toggleCommentPin
 };

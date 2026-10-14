@@ -178,9 +178,9 @@ const login = async (req, res, next) => {
 const getMe = async (req, res, next) => {
   try {
     const user = await User.findById(req.user._id).select('+hideActivity +inactivityRemindersEnabled +moderationWarnings')
-      .populate('connections', 'name headline profilePicture company jobTitle isVerifiedAccount')
-      .populate('followers', 'name headline profilePicture isVerifiedAccount')
-      .populate('following', 'name headline profilePicture isVerifiedAccount');
+      .populate('connections', 'name headline profilePicture company jobTitle isVerifiedAccount verificationBadgeColor')
+      .populate('followers', 'name headline profilePicture isVerifiedAccount verificationBadgeColor')
+      .populate('following', 'name headline profilePicture isVerifiedAccount verificationBadgeColor');
 
     if (!user) {
       return res.status(404).json({

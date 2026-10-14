@@ -10,14 +10,7 @@ const { normalizeReaction, toggleReaction } = require('../utils/messageReactions
 const { processUploadedMedia, deleteUploadedMedia } = require('../middleware/uploadMiddleware');
 const fs = require('fs/promises');
 const { isAdminEmail } = require('../utils/adminAccess');
-
-const hasAcceptedConnection = async (userId, peerId) => Boolean(await Connection.exists({
-  status: 'accepted',
-  $or: [
-    { requester: userId, recipient: peerId },
-    { requester: peerId, recipient: userId }
-  ]
-}));
+const { getMessagePermission } = require('../utils/directMessagePermissions');
 
 const isParticipant = (conversation, userId) => conversation.participants.some(
   (participant) => participant._id?.toString() === userId.toString() || participant.toString() === userId.toString()
@@ -33,7 +26,9 @@ const getAuthorizedConversation = async (conversationId, userId) => {
     return { conversation, peerId: conversation.officialSender };
   }
   const peerId = conversation.participants.find((participant) => participant.toString() !== userId.toString());
-  if (!peerId || !(await hasAcceptedConnection(userId, peerId))) return null;
+  if (!peerId) return null;
+  const permission = await getMessagePermission({ initiatorId: userId, peerId, conversation });
+  if (!permission.allowed) return null;
   return { conversation, peerId };
 };
 
@@ -48,17 +43,22 @@ const requireConversationParticipant = async (req, res, next) => {
 
 const getContacts = async (req, res, next) => {
   try {
-    const accepted = await Connection.find({
-      status: 'accepted',
+    const relationships = await Connection.find({
+      status: { $in: ['accepted', 'pending'] },
       $or: [{ requester: req.user._id }, { recipient: req.user._id }]
     }).select('requester recipient').lean();
 
-    const ids = accepted.map(({ requester, recipient }) => (
+    const ids = relationships.map(({ requester, recipient }) => (
       requester.toString() === req.user._id.toString() ? recipient : requester
     ));
-    const contacts = await User.find({ _id: { $in: ids } })
+    const candidateContacts = await User.find({ _id: { $in: ids } })
       .select('name headline profilePicture isVerifiedAccount verificationBadgeColor +encryptionPublicKey +encryptionSigningPublicKey encryptionKeyVersion')
       .lean();
+    const permitted = await Promise.all(candidateContacts.map(async (contact) => ({
+      contact,
+      permission: await getMessagePermission({ initiatorId: req.user._id, peerId: contact._id })
+    })));
+    const contacts = permitted.filter(({ permission }) => permission.allowed).map(({ contact }) => contact);
 
     res.set('Cache-Control', 'private, no-store');
     res.json({ success: true, contacts });
@@ -176,20 +176,18 @@ const listConversations = async (req, res, next) => {
         : conversation.participants.find((participant) => participant._id.toString() !== req.user._id.toString()),
       isOfficialBroadcast: Boolean(conversation.isOfficialBroadcast)
     })).filter(({ peer, conversation, isOfficialBroadcast }) => Boolean(peer) && !conversation.hiddenFor.some((userId) => userId.toString() === req.user._id.toString()) && (!isOfficialBroadcast || String(conversation.officialRecipient) === String(req.user._id)));
-    const peerIds = conversationsWithPeers.map(({ peer }) => peer._id);
-    const acceptedConnections = peerIds.length ? await Connection.find({
-      status: 'accepted',
-      $or: [
-        { requester: req.user._id, recipient: { $in: peerIds } },
-        { requester: { $in: peerIds }, recipient: req.user._id }
-      ]
-    }).select('requester recipient').lean() : [];
-    const acceptedPeerIds = new Set(acceptedConnections.map(({ requester, recipient }) => (
-      requester.toString() === req.user._id.toString() ? recipient.toString() : requester.toString()
-    )));
-    const visibleConversations = conversationsWithPeers.filter(({ conversation, peer, isOfficialBroadcast }) => (
-      (isOfficialBroadcast || acceptedPeerIds.has(peer._id.toString())) &&
-      !conversation.hiddenFor.some((userId) => userId.toString() === req.user._id.toString())
+    const visibilityChecks = await Promise.all(conversationsWithPeers.map(async ({ conversation, peer, isOfficialBroadcast }) => ({
+      conversation,
+      peer,
+      isOfficialBroadcast,
+      allowed: isOfficialBroadcast || (await getMessagePermission({
+        initiatorId: req.user._id,
+        peerId: peer._id,
+        conversation
+      })).allowed
+    })));
+    const visibleConversations = visibilityChecks.filter(({ conversation, allowed }) => (
+      allowed && !conversation.hiddenFor.some((userId) => userId.toString() === req.user._id.toString())
     ));
     const visibleConversationIds = visibleConversations.map(({ conversation }) => conversation._id);
     const latestMessages = visibleConversationIds.length ? await DirectMessage.aggregate([
@@ -235,20 +233,16 @@ const openConversation = async (req, res, next) => {
     if (!mongoose.isValidObjectId(peerId) || peerId === req.user._id.toString()) {
       return res.status(400).json({ success: false, message: 'Choose a valid connected person.' });
     }
-    const [accepted, peer] = await Promise.all([
-      hasAcceptedConnection(req.user._id, peerId),
-      User.findById(peerId).select('name headline profilePicture isVerifiedAccount verificationBadgeColor +encryptionPublicKey +encryptionSigningPublicKey encryptionKeyVersion')
-    ]);
-    if (!accepted) {
-      return res.status(403).json({ success: false, message: 'Messages are only available between accepted connections.' });
-    }
+    const peer = await User.findById(peerId).select('name headline profilePicture isVerifiedAccount verificationBadgeColor +encryptionPublicKey +encryptionSigningPublicKey encryptionKeyVersion');
     if (!peer) return res.status(404).json({ success: false, message: 'Connected account not found.' });
 
     const pairKey = [req.user._id.toString(), peer._id.toString()].sort().join(':');
     let conversation = await Conversation.findOne({ pairKey });
+    const permission = await getMessagePermission({ initiatorId: req.user._id, peerId, conversation });
+    if (!permission.allowed) return res.status(403).json({ success: false, message: permission.message });
     if (!conversation) {
       try {
-        conversation = await Conversation.create({ pairKey, participants: [req.user._id, peer._id] });
+        conversation = await Conversation.create({ pairKey, participants: [req.user._id, peer._id], initiatedBy: req.user._id });
       } catch (error) {
         if (error.code !== 11000) throw error;
         conversation = await Conversation.findOne({ pairKey });

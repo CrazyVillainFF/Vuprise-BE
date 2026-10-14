@@ -52,7 +52,7 @@ const sendConnectionRequest = async (req, res, next) => {
           success: false,
           message: existing.requester.toString() === requesterId.toString()
             ? 'Connection request already sent.'
-            : 'This user has already sent you a connection request. Please accept it.'
+            : 'This user has already connected with you. Connect back to become mutual connections.'
         });
       }
     }
@@ -149,14 +149,14 @@ const acceptConnectionRequest = async (req, res, next) => {
         sender: currentUserId,
         connection: connection._id,
         type: 'connection_accepted',
-        message: `${req.user.name} accepted your connection request. You are now connected!`
+        message: `${req.user.name} connected back. You are now mutually connected!`
       } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
     res.status(200).json({
       success: true,
-      message: 'Connection accepted!',
+      message: 'Connected back. You are now mutually connected!',
       connection
     });
   } catch (error) {
