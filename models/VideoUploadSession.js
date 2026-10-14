@@ -6,6 +6,9 @@ const VideoUploadSessionSchema = new mongoose.Schema({
   publicId: { type: String, required: true, unique: true },
   trimStart: { type: Number, required: true, min: 0 },
   trimEnd: { type: Number, required: true, min: 0 },
+  // Original duration reported by the browser's selected local video, in seconds.
+  // Optional for compatibility with upload sessions created by older clients.
+  clientVideoDuration: { type: Number, min: 0.001 },
   presentation: { type: String, enum: ['post', 'reel'], default: 'post' },
   cropMode: { type: String, enum: ['cover', 'fit'], default: 'cover' },
   coverTime: { type: Number, min: 0 },

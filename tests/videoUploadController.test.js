@@ -64,23 +64,56 @@ test('server rejects oversized, invalid-format, invalid-trim and malformed uploa
   assert.throws(() => validateSignRequest(validRequest({ presentation: 'reel', coverTime: 31 })), { code: 'invalid_presentation' });
 });
 
-test('trim verification accepts an 18-second source ending exactly at EOF', () => {
-  assert.deepEqual(resolveTrimAgainstSource(18, 0, 18), {
+test('trim verification accepts an 18-second source ending exactly at browser and provider EOF', () => {
+  assert.deepEqual(resolveTrimAgainstSource(18, 0, 18, 18), {
     valid: true, effectiveEnd: 18, clipDuration: 18, endDelta: 0,
   });
 });
 
-test('trim verification safely resolves fractional container duration drift at EOF', () => {
-  const result = resolveTrimAgainstSource(18.375, 0, 18.4);
+test('trim verification clamps a browser EOF to Cloudinary EOF when fractional metadata differs', () => {
+  const result = resolveTrimAgainstSource(17.9, 0, 18.375, 18.375);
   assert.equal(result.valid, true);
-  assert.equal(result.effectiveEnd, 18.375);
-  assert.equal(result.clipDuration, 18.375);
+  assert.equal(result.effectiveEnd, 17.9);
+  assert.equal(result.clipDuration, 17.9);
 });
 
 test('trim verification rejects an end genuinely outside the source tolerance', () => {
-  const result = resolveTrimAgainstSource(18, 0, 18.6);
+  const result = resolveTrimAgainstSource(18, 0, 18.6, 20);
   assert.equal(result.valid, false);
   assert.equal(Number.isNaN(result.effectiveEnd), true);
+});
+
+test('trim verification does not clamp an out-of-range interior endpoint', () => {
+  assert.equal(resolveTrimAgainstSource(18, 0, 18.6, 18.8).valid, false);
+});
+
+test('publish clamps only a browser-reported source EOF to the verified Cloudinary EOF', async () => {
+  const userId = new mongoose.Types.ObjectId();
+  const sessionId = new mongoose.Types.ObjectId();
+  const postId = new mongoose.Types.ObjectId();
+  const session = {
+    _id: sessionId, user: userId, publicId: 'nexora/posts/videos/eof-check', status: 'uploading',
+    mimeType: 'video/mp4', declaredBytes: 1000, trimStart: 0, trimEnd: 18.8,
+    clientVideoDuration: 18.8, createdAt: new Date(), authorizationIssuedAt: new Date(),
+    async save() { this.saved = true; },
+  };
+  const storedPost = { toObject: () => ({ _id: postId, author: userId }) };
+  let createdPost;
+  VideoUploadSession.findOne = async () => session;
+  Post.findOne = () => query(null);
+  Post.create = async (fields) => { createdPost = fields; return { ...fields, _id: postId }; };
+  Post.findById = () => ({ populate: async () => storedPost });
+  cloudinary.url = (publicId) => `https://res.cloudinary.test/${publicId}`;
+  cloudinary.api.resource = async () => ({
+    resource_type: 'video', public_id: session.publicId, format: 'mp4', bytes: 1000, duration: 18,
+  });
+  const res = response();
+  await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId), clientVideoDuration: 18.8 } }, res, assert.fail);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.success, true);
+  assert.equal(session.status, 'published');
+  assert.equal(createdPost.videoTrimEnd, 18);
+  assert.equal(createdPost.videoDuration, 18);
 });
 
 test('unauthorized callers cannot receive a signed upload authorization', async () => {
@@ -93,9 +126,10 @@ test('unauthorized callers cannot receive a signed upload authorization', async 
 test('signing validates auth input and returns scoped Cloudinary fields without the API secret', async () => {
   const userId = new mongoose.Types.ObjectId();
   const sessionId = new mongoose.Types.ObjectId();
+  let createdSessionData;
   VideoUploadSession.countDocuments = async () => 0;
   VideoUploadSession.findOne = async () => null;
-  VideoUploadSession.create = async (data) => ({ ...data, _id: sessionId });
+  VideoUploadSession.create = async (data) => { createdSessionData = data; return { ...data, _id: sessionId }; };
   cloudinary.utils.api_sign_request = (params, secret) => {
     assert.equal(secret, 'test-secret-not-returned');
     assert.match(params.public_id, new RegExp(`nexora/posts/videos/${userId}/`));
@@ -104,13 +138,14 @@ test('signing validates auth input and returns scoped Cloudinary fields without 
     return 'short-lived-signature';
   };
   const res = response();
-  await signUpload({ user: { _id: userId }, body: validRequest() }, res, assert.fail);
+  await signUpload({ user: { _id: userId }, body: validRequest({ clientVideoDuration: 32 }) }, res, assert.fail);
   assert.equal(res.statusCode, 200);
   assert.equal(res.body.signature, 'short-lived-signature');
   assert.equal(res.body.apiKey, 'test-key');
   assert.equal('apiSecret' in res.body, false);
   assert.equal(JSON.stringify(res.body).includes('test-secret-not-returned'), false);
   assert.equal(res.body.context, `user_id=${userId}|upload_session=${sessionId}`);
+  assert.equal(createdSessionData.clientVideoDuration, 32);
 });
 
 test('publish refuses to finalize a session owned by another user', async () => {

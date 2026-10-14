@@ -31,16 +31,20 @@ const reportMetric = (event, startedAt, bytes, category = 'ok') => {
   }));
 };
 
-const resolveTrimAgainstSource = (sourceDuration, trimStart, requestedTrimEnd) => {
+const resolveTrimAgainstSource = (sourceDuration, trimStart, requestedTrimEnd, clientVideoDuration) => {
   const duration = Number(sourceDuration);
   const start = Number(trimStart);
   const requestedEnd = Number(requestedTrimEnd);
+  const browserDuration = Number(clientVideoDuration);
   const finite = Number.isFinite(duration) && duration > 0 && Number.isFinite(start) && Number.isFinite(requestedEnd);
   const endDelta = finite ? requestedEnd - duration : Infinity;
-  // Cloudinary and browser container parsers may differ slightly. Only
-  // when the requested EOF is within that known metadata tolerance do we use
-  // Cloudinary's actual endpoint. Larger gaps remain a real validation error.
-  const withinSource = finite && endDelta <= SOURCE_DURATION_TOLERANCE_SECONDS;
+  // When the user selected the actual end of the browser-read source, a
+  // parser disagreement must not turn that endpoint into an invalid interior
+  // trim. Clamp only to Cloudinary's verified EOF; never extend the asset or
+  // waive an out-of-range interior trim.
+  const selectedBrowserEof = Number.isFinite(browserDuration) && browserDuration > 0
+    && Math.abs(requestedEnd - browserDuration) <= 0.05;
+  const withinSource = finite && (endDelta <= SOURCE_DURATION_TOLERANCE_SECONDS || selectedBrowserEof);
   const effectiveEnd = withinSource ? Math.min(requestedEnd, duration) : NaN;
   const clipDuration = effectiveEnd - start;
   return {
@@ -67,6 +71,9 @@ const validateSignRequest = ({ mimeType, fileSize, trimStart, trimEnd, clientVid
   if (browserDuration !== undefined && (!Number.isFinite(browserDuration) || browserDuration <= 0)) {
     throw httpError(400, 'The selected video duration is not ready yet. Wait for the preview duration, then retry.', 'invalid_video_duration');
   }
+  if (browserDuration !== undefined && end - browserDuration > 0.05) {
+    throw httpError(400, 'The selected trim end is beyond the browser-detected source duration.', 'invalid_trim');
+  }
   if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9_-]{16,80}$/.test(idempotencyKey)) {
     throw httpError(400, 'The upload could not be started. Please retry.', 'invalid_request');
   }
@@ -74,7 +81,7 @@ const validateSignRequest = ({ mimeType, fileSize, trimStart, trimEnd, clientVid
   if (!['post', 'reel'].includes(presentation) || !['cover', 'fit'].includes(cropMode) || !Number.isFinite(cover) || cover < start || cover > end) {
     throw httpError(400, 'Choose a valid Reel layout and cover frame.', 'invalid_presentation');
   }
-  return { mimeType, fileSize: size, trimStart: start, trimEnd: end, idempotencyKey, presentation, cropMode, coverTime: cover };
+  return { mimeType, fileSize: size, trimStart: start, trimEnd: end, clientVideoDuration: browserDuration, idempotencyKey, presentation, cropMode, coverTime: cover };
 };
 
 const signUpload = async (req, res, next) => {
@@ -107,6 +114,7 @@ const signUpload = async (req, res, next) => {
         publicId,
         trimStart: input.trimStart,
         trimEnd: input.trimEnd,
+        clientVideoDuration: input.clientVideoDuration,
         presentation: input.presentation,
         cropMode: input.cropMode,
         coverTime: input.coverTime,
@@ -115,7 +123,7 @@ const signUpload = async (req, res, next) => {
         authorizationIssuedAt: new Date(),
         cleanupAfter: new Date(Date.now() + CLEANUP_AFTER_MS),
       });
-    } else if (session.declaredBytes !== input.fileSize || session.mimeType !== input.mimeType || session.trimStart !== input.trimStart || session.trimEnd !== input.trimEnd || (session.presentation || 'post') !== input.presentation || (session.cropMode || 'cover') !== input.cropMode || (session.coverTime ?? session.trimStart) !== input.coverTime) {
+    } else if (session.declaredBytes !== input.fileSize || session.mimeType !== input.mimeType || session.trimStart !== input.trimStart || session.trimEnd !== input.trimEnd || (session.clientVideoDuration != null && input.clientVideoDuration != null && session.clientVideoDuration !== input.clientVideoDuration) || (session.presentation || 'post') !== input.presentation || (session.cropMode || 'cover') !== input.cropMode || (session.coverTime ?? session.trimStart) !== input.coverTime) {
       throw httpError(409, 'The selected video or trim range changed. Select the video again to retry.', 'upload_mismatch');
     } else {
       // Refresh the ticket's provider timestamp for a safe retry using the same idempotency key.
@@ -223,11 +231,12 @@ const publishUploadedVideo = async (req, res, next) => {
     );
     const isOwned = publicIdMatches && ownershipContextMatches;
     const validFormat = formats?.includes(String(resource.format || '').toLowerCase());
-    const trimResolution = resolveTrimAgainstSource(sourceDuration, session.trimStart, session.trimEnd);
+    const clientVideoDuration = session.clientVideoDuration ?? Number(req.body?.clientVideoDuration);
+    const trimResolution = resolveTrimAgainstSource(sourceDuration, session.trimStart, session.trimEnd, clientVideoDuration);
     const effectiveTrimEnd = trimResolution.effectiveEnd;
     const effectiveClipDuration = trimResolution.clipDuration;
     const validDuration = trimResolution.valid;
-    console.info('[video-upload] trim-duration-verification', JSON.stringify({ clientVideoDurationSeconds: Number(req.body?.clientVideoDuration), cloudinarySourceDurationSeconds: sourceDuration, trimStartSeconds: session.trimStart, requestedTrimEndSeconds: session.trimEnd, effectiveTrimEndSeconds: effectiveTrimEnd, effectiveClipDurationSeconds: effectiveClipDuration, endDeltaSeconds: session.trimEnd - sourceDuration, sourceDurationToleranceSeconds: SOURCE_DURATION_TOLERANCE_SECONDS, fullSourceUploaded: true, trimAppliedAsDeliveryTransform: true }));
+    console.info('[video-upload] trim-duration-verification', JSON.stringify({ clientVideoDurationSeconds: Number.isFinite(clientVideoDuration) ? clientVideoDuration : null, cloudinarySourceDurationSeconds: sourceDuration, trimStartSeconds: session.trimStart, requestedTrimEndSeconds: session.trimEnd, effectiveTrimEndSeconds: effectiveTrimEnd, effectiveClipDurationSeconds: effectiveClipDuration, endDeltaSeconds: session.trimEnd - sourceDuration, selectedBrowserEof: Number.isFinite(clientVideoDuration) && Math.abs(session.trimEnd - clientVideoDuration) <= 0.05, sourceDurationToleranceSeconds: SOURCE_DURATION_TOLERANCE_SECONDS, fullSourceUploaded: true, trimAppliedAsDeliveryTransform: true }));
     if (resource.resource_type !== 'video' || !isOwned || !validFormat || !Number.isFinite(resourceBytes) || resourceBytes <= 0 || resourceBytes > MAX_VIDEO_BYTES || !validDuration) {
       console.warn('[video-upload] provider-asset-rejected', JSON.stringify({
         resourceTypeValid: resource.resource_type === 'video',
