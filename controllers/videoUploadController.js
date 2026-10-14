@@ -19,6 +19,15 @@ const ALLOWED_MIME_FORMATS = Object.freeze({
 });
 
 const httpError = (statusCode, message, code) => Object.assign(new Error(message), { statusCode, code });
+// Cloudinary's Admin API reports video duration in seconds. Treat absent,
+// null, empty, and non-finite values as unavailable metadata; Number(null)
+// would otherwise misleadingly become 0 and be handled as a bad trim.
+const readCloudinaryDurationSeconds = (resource) => {
+  const value = resource?.duration;
+  if (value === null || value === undefined || value === '') return NaN;
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration > 0 ? duration : NaN;
+};
 const isCloudinaryConfigured = () => Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
 const reportMetric = (event, startedAt, bytes, category = 'ok') => {
   const memory = process.memoryUsage();
@@ -222,7 +231,20 @@ const publishUploadedVideo = async (req, res, next) => {
     }
     const formats = ALLOWED_MIME_FORMATS[session.mimeType];
     const context = resource.context?.custom || resource.context || {};
-    const sourceDuration = Number(resource.duration);
+    const sourceDuration = readCloudinaryDurationSeconds(resource);
+    if (!Number.isFinite(sourceDuration)) {
+      // A missing provider duration is not evidence of an invalid user trim.
+      // Keep the verified source asset and upload session so a retry can
+      // re-query Cloudinary once its metadata is available.
+      reportMetric('duration-metadata-unavailable', startedAt, session.declaredBytes, 'metadata_incomplete');
+      console.warn('[video-upload] duration-metadata-unavailable', JSON.stringify({
+        resourceReturned: Boolean(resource),
+        durationFieldPresent: Boolean(resource && Object.hasOwn(resource, 'duration')),
+        durationFieldType: resource?.duration === null ? 'null' : typeof resource?.duration,
+        fullSourceUploaded: true,
+      }));
+      throw httpError(503, 'Cloud storage has not provided the video duration yet. Your uploaded video is safe; retry publishing shortly.', 'duration_metadata_unavailable');
+    }
     const resourceBytes = Number(resource.bytes);
     // The database session is already scoped to the authenticated user and
     // contains a server-generated, unique Cloudinary public ID. Context is

@@ -139,6 +139,35 @@ test('publish clamps only a browser-reported source EOF to the verified Cloudina
   assert.equal(createdPost.videoDuration, 18);
 });
 
+test('missing Cloudinary duration for the logged 18.3s browser-EOF case stays retryable and preserves the uploaded source', async () => {
+  const userId = new mongoose.Types.ObjectId();
+  const sessionId = new mongoose.Types.ObjectId();
+  const session = {
+    _id: sessionId, user: userId, publicId: 'nexora/posts/videos/missing-duration', status: 'uploading',
+    mimeType: 'video/mp4', declaredBytes: 1000, trimStart: 0, trimEnd: 18.3,
+    clientVideoDuration: 18.3, createdAt: new Date(), authorizationIssuedAt: new Date(),
+    async save() { this.saved = true; },
+  };
+  let destroyed = false;
+  let postCreated = false;
+  VideoUploadSession.findOne = async () => session;
+  Post.findOne = () => query(null);
+  Post.create = async () => { postCreated = true; throw new Error('must not publish without provider duration'); };
+  cloudinary.api.resource = async () => ({
+    resource_type: 'video', public_id: session.publicId, format: 'mp4', bytes: 1000, duration: null,
+  });
+  cloudinary.uploader.destroy = async () => { destroyed = true; };
+
+  const res = response();
+  await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId), clientVideoDuration: 18.3 } }, res, assert.fail);
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.body.code, 'duration_metadata_unavailable');
+  assert.match(res.body.message, /retry publishing shortly/i);
+  assert.equal(session.status, 'uploading');
+  assert.equal(destroyed, false);
+  assert.equal(postCreated, false);
+});
+
 test('unauthorized callers cannot receive a signed upload authorization', async () => {
   const res = response();
   await signUpload({ body: validRequest() }, res, assert.fail);
