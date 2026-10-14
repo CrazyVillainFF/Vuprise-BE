@@ -8,6 +8,7 @@ const {
   signUpload,
   publishUploadedVideo,
   validateSignRequest,
+  resolveTrimAgainstSource,
   MAX_VIDEO_BYTES,
 } = require('../controllers/videoUploadController');
 
@@ -61,6 +62,25 @@ test('server rejects oversized, invalid-format, invalid-trim and malformed uploa
   assert.equal(reel.coverTime, 61);
   assert.equal(reel.cropMode, 'fit');
   assert.throws(() => validateSignRequest(validRequest({ presentation: 'reel', coverTime: 31 })), { code: 'invalid_presentation' });
+});
+
+test('trim verification accepts an 18-second source ending exactly at EOF', () => {
+  assert.deepEqual(resolveTrimAgainstSource(18, 0, 18), {
+    valid: true, effectiveEnd: 18, clipDuration: 18, endDelta: 0,
+  });
+});
+
+test('trim verification safely resolves fractional container duration drift at EOF', () => {
+  const result = resolveTrimAgainstSource(18.375, 0, 18.4);
+  assert.equal(result.valid, true);
+  assert.equal(result.effectiveEnd, 18.375);
+  assert.equal(result.clipDuration, 18.375);
+});
+
+test('trim verification rejects an end genuinely outside the source tolerance', () => {
+  const result = resolveTrimAgainstSource(18, 0, 18.6);
+  assert.equal(result.valid, false);
+  assert.equal(Number.isNaN(result.effectiveEnd), true);
 });
 
 test('unauthorized callers cannot receive a signed upload authorization', async () => {

@@ -8,7 +8,7 @@ const MAX_VIDEO_BYTES = 250 * 1024 * 1024;
 const MAX_CLIP_SECONDS = 35;
 // Browsers and Cloudinary can report container duration with small rounding
 // differences. The clip endpoint naturally clamps a trim at the true EOF.
-const SOURCE_DURATION_TOLERANCE_SECONDS = 0.5;
+const SOURCE_DURATION_TOLERANCE_SECONDS = 0.25;
 const SIGNATURE_VALIDITY_MS = 60 * 60 * 1000;
 const CLEANUP_AFTER_MS = 24 * 60 * 60 * 1000;
 const ALLOWED_MIME_FORMATS = Object.freeze({
@@ -31,16 +31,41 @@ const reportMetric = (event, startedAt, bytes, category = 'ok') => {
   }));
 };
 
-const validateSignRequest = ({ mimeType, fileSize, trimStart, trimEnd, idempotencyKey, presentation = 'post', cropMode = 'cover', coverTime }) => {
+const resolveTrimAgainstSource = (sourceDuration, trimStart, requestedTrimEnd) => {
+  const duration = Number(sourceDuration);
+  const start = Number(trimStart);
+  const requestedEnd = Number(requestedTrimEnd);
+  const finite = Number.isFinite(duration) && duration > 0 && Number.isFinite(start) && Number.isFinite(requestedEnd);
+  const endDelta = finite ? requestedEnd - duration : Infinity;
+  // Cloudinary and browser container parsers may differ slightly. Only
+  // when the requested EOF is within that known metadata tolerance do we use
+  // Cloudinary's actual endpoint. Larger gaps remain a real validation error.
+  const withinSource = finite && endDelta <= SOURCE_DURATION_TOLERANCE_SECONDS;
+  const effectiveEnd = withinSource ? Math.min(requestedEnd, duration) : NaN;
+  const clipDuration = effectiveEnd - start;
+  return {
+    valid: withinSource && clipDuration > 0 && clipDuration <= MAX_CLIP_SECONDS + 0.001
+      && requestedEnd - start <= MAX_CLIP_SECONDS + 0.001,
+    effectiveEnd,
+    clipDuration,
+    endDelta,
+  };
+};
+
+const validateSignRequest = ({ mimeType, fileSize, trimStart, trimEnd, clientVideoDuration, idempotencyKey, presentation = 'post', cropMode = 'cover', coverTime }) => {
   const start = Number(trimStart);
   const end = Number(trimEnd);
   const size = Number(fileSize);
+  const browserDuration = clientVideoDuration === undefined ? undefined : Number(clientVideoDuration);
   if (!ALLOWED_MIME_FORMATS[mimeType]) throw httpError(415, 'Choose an MP4, WebM, or MOV video.', 'unsupported_format');
   if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_VIDEO_BYTES) throw httpError(413, 'Videos must be smaller than 250MB.', 'file_too_large');
   // Trim positions are absolute offsets into the source video. A 30-second
   // selection beginning at 40s is valid; only its duration must be <= 35s.
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end - start > MAX_CLIP_SECONDS + 0.001) {
     throw httpError(400, 'Choose a valid video clip that is 35 seconds or shorter.', 'invalid_trim');
+  }
+  if (browserDuration !== undefined && (!Number.isFinite(browserDuration) || browserDuration <= 0)) {
+    throw httpError(400, 'The selected video duration is not ready yet. Wait for the preview duration, then retry.', 'invalid_video_duration');
   }
   if (typeof idempotencyKey !== 'string' || !/^[A-Za-z0-9_-]{16,80}$/.test(idempotencyKey)) {
     throw httpError(400, 'The upload could not be started. Please retry.', 'invalid_request');
@@ -60,6 +85,7 @@ const signUpload = async (req, res, next) => {
     if (!isCloudinaryConfigured()) throw httpError(503, 'Video publishing is temporarily unavailable. Cloud storage is not configured.', 'storage_unavailable');
     const input = validateSignRequest(req.body || {});
     declaredBytes = input.fileSize;
+    console.info('[video-upload] client-trim-selection', JSON.stringify({ videoDurationSeconds: Number(req.body?.clientVideoDuration), trimStartSeconds: input.trimStart, trimEndSeconds: input.trimEnd, uploadedAssetIsFullSource: true }));
 
     const recentUploads = await VideoUploadSession.countDocuments({ user: req.user._id, createdAt: { $gte: new Date(Date.now() - 60_000) } });
     if (recentUploads >= 5) throw httpError(429, 'Too many video upload attempts. Please wait a minute and try again.', 'rate_limited');
@@ -197,13 +223,11 @@ const publishUploadedVideo = async (req, res, next) => {
     );
     const isOwned = publicIdMatches && ownershipContextMatches;
     const validFormat = formats?.includes(String(resource.format || '').toLowerCase());
-    const effectiveTrimEnd = Math.min(session.trimEnd, sourceDuration);
-    const effectiveClipDuration = effectiveTrimEnd - session.trimStart;
-    const validDuration = Number.isFinite(sourceDuration)
-      && sourceDuration + SOURCE_DURATION_TOLERANCE_SECONDS >= session.trimEnd
-      && effectiveClipDuration > 0
-      && effectiveClipDuration <= MAX_CLIP_SECONDS + 0.001
-      && session.trimEnd - session.trimStart <= MAX_CLIP_SECONDS + 0.001;
+    const trimResolution = resolveTrimAgainstSource(sourceDuration, session.trimStart, session.trimEnd);
+    const effectiveTrimEnd = trimResolution.effectiveEnd;
+    const effectiveClipDuration = trimResolution.clipDuration;
+    const validDuration = trimResolution.valid;
+    console.info('[video-upload] trim-duration-verification', JSON.stringify({ clientVideoDurationSeconds: Number(req.body?.clientVideoDuration), cloudinarySourceDurationSeconds: sourceDuration, trimStartSeconds: session.trimStart, requestedTrimEndSeconds: session.trimEnd, effectiveTrimEndSeconds: effectiveTrimEnd, effectiveClipDurationSeconds: effectiveClipDuration, endDeltaSeconds: session.trimEnd - sourceDuration, sourceDurationToleranceSeconds: SOURCE_DURATION_TOLERANCE_SECONDS, fullSourceUploaded: true, trimAppliedAsDeliveryTransform: true }));
     if (resource.resource_type !== 'video' || !isOwned || !validFormat || !Number.isFinite(resourceBytes) || resourceBytes <= 0 || resourceBytes > MAX_VIDEO_BYTES || !validDuration) {
       console.warn('[video-upload] provider-asset-rejected', JSON.stringify({
         resourceTypeValid: resource.resource_type === 'video',
@@ -303,4 +327,4 @@ const cleanupAbandonedVideoUploads = async () => {
   }
 };
 
-module.exports = { signUpload, publishUploadedVideo, cleanupAbandonedVideoUploads, validateSignRequest, makeVideoUrls, MAX_VIDEO_BYTES, MAX_CLIP_SECONDS };
+module.exports = { signUpload, publishUploadedVideo, cleanupAbandonedVideoUploads, validateSignRequest, resolveTrimAgainstSource, makeVideoUrls, MAX_VIDEO_BYTES, MAX_CLIP_SECONDS };
