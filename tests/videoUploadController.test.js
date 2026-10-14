@@ -110,7 +110,7 @@ test('publish independently validates ownership, format, size, duration and clip
     createdAt: new Date(), authorizationIssuedAt: new Date(), async save() { this.saved = true; },
   };
   let resource = {
-    resource_type: 'video', format: 'mp4', bytes: 1000, duration: 40,
+    resource_type: 'video', public_id: 'nexora/posts/videos/owned', format: 'mp4', bytes: 1000, duration: 40,
     context: { custom: { user_id: String(userId), upload_session: String(sessionId) } },
   };
   let destroyed = false;
@@ -163,9 +163,20 @@ test('publish independently validates ownership, format, size, duration and clip
   assert.equal(durationDriftResponse.statusCode, 201);
   assert.equal(session.status, 'published');
   assert.equal(destroyed, false);
+  assert.equal(createdPost.videoDuration, 29.8);
+  assert.equal(createdPost.videoTrimEnd, 29.8);
+
+  // The authenticated database session and generated public ID remain
+  // authoritative when Cloudinary omits optional custom context in a response.
+  resource = { ...resource, duration: 40, context: undefined };
+  session.status = 'uploading';
+  const missingContextResponse = response();
+  await publishUploadedVideo({ user: { _id: userId }, body: { uploadId: String(sessionId) } }, missingContextResponse, assert.fail);
+  assert.equal(missingContextResponse.statusCode, 201);
 
   for (const [reason, invalid] of [
     ['forged owner context', { ...resource, context: { custom: { user_id: 'someone-else', upload_session: String(sessionId) } } }],
+    ['mismatched public ID', { ...resource, public_id: 'nexora/posts/videos/another-upload' }],
     ['unsupported format', { ...resource, format: 'avi' }],
     ['excessive size', { ...resource, bytes: MAX_VIDEO_BYTES + 1 }],
     ['too-short source', { ...resource, duration: 20 }],

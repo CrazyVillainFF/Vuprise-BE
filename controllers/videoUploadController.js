@@ -184,15 +184,32 @@ const publishUploadedVideo = async (req, res, next) => {
     const context = resource.context?.custom || resource.context || {};
     const sourceDuration = Number(resource.duration);
     const resourceBytes = Number(resource.bytes);
-    const isOwned = context.user_id === String(req.user._id) && context.upload_session === String(session._id);
+    // The database session is already scoped to the authenticated user and
+    // contains a server-generated, unique Cloudinary public ID. Context is
+    // useful defense-in-depth, but some provider responses omit custom context
+    // even when the asset lookup succeeds. Require it to match only when claims
+    // are returned; never let absent optional metadata reject a valid upload.
+    const publicIdMatches = resource.public_id === session.publicId;
+    const hasOwnershipContext = Object.hasOwn(context, 'user_id') || Object.hasOwn(context, 'upload_session');
+    const ownershipContextMatches = !hasOwnershipContext || (
+      context.user_id === String(req.user._id)
+      && context.upload_session === String(session._id)
+    );
+    const isOwned = publicIdMatches && ownershipContextMatches;
     const validFormat = formats?.includes(String(resource.format || '').toLowerCase());
+    const effectiveTrimEnd = Math.min(session.trimEnd, sourceDuration);
+    const effectiveClipDuration = effectiveTrimEnd - session.trimStart;
     const validDuration = Number.isFinite(sourceDuration)
       && sourceDuration + SOURCE_DURATION_TOLERANCE_SECONDS >= session.trimEnd
+      && effectiveClipDuration > 0
+      && effectiveClipDuration <= MAX_CLIP_SECONDS + 0.001
       && session.trimEnd - session.trimStart <= MAX_CLIP_SECONDS + 0.001;
     if (resource.resource_type !== 'video' || !isOwned || !validFormat || !Number.isFinite(resourceBytes) || resourceBytes <= 0 || resourceBytes > MAX_VIDEO_BYTES || !validDuration) {
       console.warn('[video-upload] provider-asset-rejected', JSON.stringify({
         resourceTypeValid: resource.resource_type === 'video',
-        ownerContextValid: isOwned,
+        publicIdMatches,
+        ownershipContextPresent: hasOwnershipContext,
+        ownershipContextMatches,
         formatValid: validFormat,
         bytesValid: Number.isFinite(resourceBytes) && resourceBytes > 0 && resourceBytes <= MAX_VIDEO_BYTES,
         durationValid: validDuration,
@@ -202,12 +219,22 @@ const publishUploadedVideo = async (req, res, next) => {
       session.status = 'rejected';
       await session.save();
       await cloudinary.uploader.destroy(session.publicId, { resource_type: 'video', invalidate: true }).catch(() => {});
-      throw httpError(400, resourceBytes > MAX_VIDEO_BYTES ? 'The uploaded video exceeds the 250MB limit.' : 'The uploaded video or selected trim range could not be verified.', 'video_validation_failed');
+      const reason = resourceBytes > MAX_VIDEO_BYTES
+        ? 'The uploaded video exceeds the 250MB limit.'
+        : !publicIdMatches || !ownershipContextMatches
+          ? 'Cloud storage returned ownership details that do not match this upload.'
+          : !validFormat
+            ? 'Cloud storage reported an unsupported video format.'
+            : !validDuration
+              ? 'The selected trim range extends beyond the detected video duration. Adjust the trim and retry.'
+              : 'The uploaded video could not be verified. Retry with the same selected video.';
+      throw httpError(400, reason, 'video_validation_failed');
     }
 
     const contentText = content.trim();
     const tags = [...new Set((contentText.match(/#[a-zA-Z0-9_]+/g) || []).map((tag) => tag.slice(1).toLowerCase()))];
-    const { videoUrl, videoThumbnail } = makeVideoUrls(session.publicId, session.trimStart, session.trimEnd, session.presentation, session.cropMode, session.coverTime);
+    const actualCoverTime = Math.max(session.trimStart, Math.min(session.coverTime ?? session.trimStart, effectiveTrimEnd - 0.01));
+    const { videoUrl, videoThumbnail } = makeVideoUrls(session.publicId, session.trimStart, effectiveTrimEnd, session.presentation, session.cropMode, actualCoverTime);
     let post;
     try {
       post = await Post.create({
@@ -220,12 +247,12 @@ const publishUploadedVideo = async (req, res, next) => {
         videoSourceUrl: '',
         videoSourcePublicId: '',
         videoSourceDuration: sourceDuration,
-        videoDuration: session.trimEnd - session.trimStart,
+        videoDuration: effectiveClipDuration,
         videoPresentation: session.presentation,
         videoCropMode: session.cropMode,
-        videoCoverTime: session.coverTime,
+        videoCoverTime: actualCoverTime,
         videoTrimStart: session.trimStart,
-        videoTrimEnd: session.trimEnd,
+        videoTrimEnd: effectiveTrimEnd,
         videoThumbnail,
         videoUploadSession: session._id,
       });
