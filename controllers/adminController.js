@@ -233,9 +233,49 @@ const listBroadcastMessages = async (req, res, next) => {
       : [0, []];
     res.json({
       success: true,
-      messages: messages.map((message) => ({ ...message, recipients: [recipientByConversation.get(String(message.conversation))].filter(Boolean), recipientCount: 1 })),
+      messages: messages.map((message) => ({ ...message, legacy: true, recipients: [recipientByConversation.get(String(message.conversation))].filter(Boolean), recipientCount: 1 })),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) }
     });
+  } catch (error) { next(error); }
+};
+
+const updateBroadcastMessage = async (req, res, next) => {
+  try {
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    if (!text || text.length > 5000) return fail(res, 400, 'Enter a message of 1 to 5000 characters.');
+    if (!validId(req.params.id)) return fail(res, 400, 'Invalid official message ID.');
+
+    const broadcast = await AdminBroadcast.findOne({ _id: req.params.id, admin: req.user._id });
+    if (broadcast) {
+      const recipientIds = broadcast.recipients || [];
+      const pairKeys = recipientIds.map((recipientId) => `official:${recipientId}`);
+      const conversations = pairKeys.length ? await Conversation.find({
+        pairKey: { $in: pairKeys }, isOfficialBroadcast: true, officialSender: req.user._id,
+      }).select('_id').lean() : [];
+      const conversationIds = conversations.map(({ _id }) => _id);
+      const editedAt = new Date();
+      if (conversationIds.length) await DirectMessage.updateMany({
+        conversation: { $in: conversationIds },
+        sender: req.user._id,
+        createdAt: broadcast.createdAt,
+        deletedForEveryone: { $ne: true },
+      }, { $set: { text, editedAt: null, updatedAt: editedAt } });
+      broadcast.text = text;
+      await broadcast.save();
+      await logAction(req, null, 'broadcast_edited', '', null, null, `${recipientIds.length} recipient(s)`);
+      return res.json({ success: true, message: 'Official message updated.', text });
+    }
+
+    // Legacy official messages are stored only as individual direct messages.
+    const message = await DirectMessage.findOne({ _id: req.params.id, sender: req.user._id, deletedForEveryone: { $ne: true } });
+    if (!message) return fail(res, 404, 'Official message not found.');
+    const conversation = await Conversation.findOne({ _id: message.conversation, isOfficialBroadcast: true, officialSender: req.user._id }).select('_id');
+    if (!conversation) return fail(res, 404, 'Official message not found.');
+    message.text = text;
+    message.editedAt = null;
+    await message.save();
+    await logAction(req, null, 'broadcast_edited', '', null, null, '1 legacy recipient');
+    return res.json({ success: true, message: 'Official message updated.', text });
   } catch (error) { next(error); }
 };
 
@@ -323,6 +363,23 @@ const addWarning = async (req, res, next) => {
     await User.updateOne({ _id: user._id, moderationStatus: { $ne: 'deleted' } }, { $push: { moderationWarnings: warning } });
     await logAction(req, user, 'warning', reason);
     res.status(201).json({ success: true, warning: { _id: warning._id, reason, createdAt: warning.createdAt } });
+  } catch (error) { next(error); }
+};
+
+const removeWarning = async (req, res, next) => {
+  try {
+    const user = await findTarget(req, res); if (!user) return;
+    if (!validId(req.params.warningId)) return fail(res, 400, 'Invalid warning ID.');
+    const warning = user.moderationWarnings?.id(req.params.warningId);
+    if (!warning) return fail(res, 404, 'Warning not found.');
+    const reason = warning.reason;
+    const result = await User.updateOne(
+      { _id: user._id, moderationStatus: { $ne: 'deleted' }, 'moderationWarnings._id': req.params.warningId },
+      { $pull: { moderationWarnings: { _id: req.params.warningId } } }
+    );
+    if (!result.modifiedCount) return fail(res, 409, 'This warning changed while you were reviewing it. Refresh and try again.');
+    await logAction(req, user, 'warning_removed', reason, null, null, `Removed warning ${req.params.warningId}`);
+    res.json({ success: true, warningId: req.params.warningId, message: 'Warning removed.' });
   } catch (error) { next(error); }
 };
 
@@ -474,4 +531,4 @@ const updateInboxItem = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { overview, listUsers, userDetail, userPosts, setVerification, broadcastMessage, listBroadcastMessages, temporaryBan, permanentBan, liftBan, addWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };
+module.exports = { overview, listUsers, userDetail, userPosts, setVerification, broadcastMessage, listBroadcastMessages, updateBroadcastMessage, temporaryBan, permanentBan, liftBan, addWarning, removeWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };

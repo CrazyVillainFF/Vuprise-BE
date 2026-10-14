@@ -11,7 +11,7 @@ const { isAdminEmail } = require('../utils/adminAccess');
 const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { createRequest, consumeRateLimit } = require('../controllers/supportController');
-const { overview, listReports, sendSupportReply, updateInboxItem, setVerification, broadcastMessage, listBroadcastMessages } = require('../controllers/adminController');
+const { overview, listReports, sendSupportReply, updateInboxItem, setVerification, broadcastMessage, listBroadcastMessages, updateBroadcastMessage, removeWarning } = require('../controllers/adminController');
 const AdminBroadcast = require('../models/AdminBroadcast');
 const { listUsers } = require('../controllers/adminController');
 const { listConversations } = require('../controllers/messageController');
@@ -300,6 +300,61 @@ test('admin sent-message page can recover broadcasts created before history reco
     DirectMessage.find = originals.messageFind;
     AdminBroadcast.find = originals.broadcastFind;
     AdminBroadcast.countDocuments = originals.broadcastCount;
+  }
+});
+
+test('admin edits official broadcast text for recipients without setting an edited marker', async () => {
+  const originals = { broadcastFindOne: AdminBroadcast.findOne, conversationFind: Conversation.find, updateMany: DirectMessage.updateMany, auditCreate: AdminAuditLog.create };
+  const adminId = '507f1f77bcf86cd799439011';
+  const recipientId = '507f1f77bcf86cd799439012';
+  const broadcastId = '507f1f77bcf86cd799439014';
+  const sentAt = new Date('2026-10-13T12:00:00.000Z');
+  const broadcast = { _id: broadcastId, admin: adminId, recipients: [recipientId], createdAt: sentAt, text: 'Old text', async save() { this.saved = true; } };
+  let filter; let update;
+  AdminBroadcast.findOne = async () => broadcast;
+  Conversation.find = () => ({ select() { return this; }, lean: async () => [{ _id: '507f1f77bcf86cd799439013' }] });
+  DirectMessage.updateMany = async (query, change) => { filter = query; update = change; return { modifiedCount: 1 }; };
+  AdminAuditLog.create = async (entry) => entry;
+  try {
+    const res = response();
+    await updateBroadcastMessage({ params: { id: broadcastId }, body: { text: '  Corrected text  ' }, user: { _id: adminId } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(broadcast.text, 'Corrected text');
+    assert.equal(broadcast.saved, true);
+    assert.deepEqual(filter.conversation, { $in: ['507f1f77bcf86cd799439013'] });
+    assert.equal(filter.createdAt, sentAt);
+    assert.equal(update.$set.text, 'Corrected text');
+    assert.equal(update.$set.editedAt, null);
+  } finally {
+    AdminBroadcast.findOne = originals.broadcastFindOne;
+    Conversation.find = originals.conversationFind;
+    DirectMessage.updateMany = originals.updateMany;
+    AdminAuditLog.create = originals.auditCreate;
+  }
+});
+
+test('admin can remove one warning while retaining other warnings', async () => {
+  const originals = { userFindById: User.findById, userUpdateOne: User.updateOne, auditCreate: AdminAuditLog.create };
+  const adminId = '507f1f77bcf86cd799439011';
+  const userId = '507f1f77bcf86cd799439012';
+  const warningId = '507f1f77bcf86cd799439013';
+  const warning = { _id: warningId, reason: 'Resolved issue', createdAt: new Date() };
+  const user = { _id: userId, moderationStatus: 'active', moderationWarnings: [warning, { _id: '507f1f77bcf86cd799439014', reason: 'Keep this' }] };
+  user.moderationWarnings.id = (id) => user.moderationWarnings.find((item) => String(item._id) === String(id));
+  let update;
+  User.findById = () => ({ select: async () => user });
+  User.updateOne = async (_filter, change) => { update = change; return { modifiedCount: 1 }; };
+  AdminAuditLog.create = async (entry) => entry;
+  try {
+    const res = response();
+    await removeWarning({ params: { id: userId, warningId }, user: { _id: adminId } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(update.$pull.moderationWarnings, { _id: warningId });
+    assert.equal(res.body.warningId, warningId);
+  } finally {
+    User.findById = originals.userFindById;
+    User.updateOne = originals.userUpdateOne;
+    AdminAuditLog.create = originals.auditCreate;
   }
 });
 
