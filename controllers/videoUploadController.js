@@ -134,7 +134,10 @@ const makeVideoUrls = (publicId, start, end, presentation = 'post', cropMode = '
     transformation: [{
       start_offset: start,
       end_offset: end,
-      ...(presentation === 'reel' ? { width: 1080, height: 1920, crop: cropMode === 'cover' ? 'fill' : 'fit', gravity: 'auto' } : {}),
+      // Keep the delivered clip's encoded frame geometry intact. Some video
+      // sources fail Cloudinary's automatic-gravity crop/transcode path and
+      // are delivered as black frames; the client applies portrait cover/fit
+      // in the player while this transformation only performs the trim.
       video_codec: 'h264',
     }],
   }),
@@ -142,7 +145,7 @@ const makeVideoUrls = (publicId, start, end, presentation = 'post', cropMode = '
     secure: true,
     resource_type: 'video',
     format: 'jpg',
-    transformation: [{ start_offset: coverTime, width: 640, ...(presentation === 'reel' ? { height: 1138, crop: cropMode === 'cover' ? 'fill' : 'fit', gravity: 'auto' } : { crop: 'limit' }) }],
+    transformation: [{ start_offset: coverTime, width: 640, crop: 'limit' }],
   }),
 });
 

@@ -147,9 +147,10 @@ test('publish independently validates ownership, format, size, duration and clip
   assert.equal(createdPost.videoPresentation, 'reel');
   assert.equal(createdPost.videoCropMode, 'cover');
   assert.equal(createdPost.videoCoverTime, 18);
-  assert.equal(deliveredTransforms[0].width, 1080);
-  assert.equal(deliveredTransforms[0].height, 1920);
-  assert.equal(deliveredTransforms[0].crop, 'fill');
+  assert.equal(deliveredTransforms[0].width, undefined);
+  assert.equal(deliveredTransforms[0].height, undefined);
+  assert.equal(deliveredTransforms[0].start_offset, 0);
+  assert.equal(deliveredTransforms[0].end_offset, 30);
   assert.equal(deliveredTransforms[1].start_offset, 18);
 
   for (const invalid of [
