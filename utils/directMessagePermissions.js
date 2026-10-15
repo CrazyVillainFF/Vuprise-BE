@@ -7,7 +7,11 @@ const messageDenied = (message) => ({ allowed: false, message });
 
 // Kept pure so the policy is regression-testable without a database.
 const evaluateDirectMessagePermission = ({ connection, initiatorId, peerId, recipientPrivateAccount, conversationInitiatedBy }) => {
-  if (!connection) return messageDenied('Connect with this member before messaging.');
+  // Public accounts may receive a first message. Private-account messaging is
+  // still enforced on the server and cannot be bypassed by the client.
+  if (!connection) return recipientPrivateAccount
+    ? messageDenied('This private account requires a connection before messaging.')
+    : { allowed: true, mode: 'public-new-conversation' };
   if (connection.status === 'accepted') return { allowed: true, mode: 'mutual' };
   if (connection.status !== 'pending') return messageDenied('This connection is no longer available for messaging.');
 
@@ -56,9 +60,7 @@ const getMessagePermission = async ({ initiatorId, peerId, conversation = null }
     connection,
     initiatorId,
     peerId,
-    recipientPrivateAccount: connection && sameId(connection.recipient, peerId)
-      ? Boolean(peer.privateAccount)
-      : Boolean(initiator.privateAccount),
+    recipientPrivateAccount: Boolean(peer.privateAccount),
     conversationInitiatedBy: conversation?.initiatedBy || null
   });
 };

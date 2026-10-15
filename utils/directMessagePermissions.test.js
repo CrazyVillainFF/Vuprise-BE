@@ -43,7 +43,10 @@ test('a private recipient-started conversation lets the connector reply', () => 
   assert.equal(result.mode, 'existing-permitted-conversation');
 });
 
-test('missing and rejected relationships never grant a direct-message permission', () => {
-  assert.equal(evaluateDirectMessagePermission({ connection: null, initiatorId: 'a', peerId: 'b', recipientPrivateAccount: false }).allowed, false);
+test('public accounts allow a first message but private accounts and rejected relationships do not', () => {
+  const publicResult = evaluateDirectMessagePermission({ connection: null, initiatorId: 'a', peerId: 'b', recipientPrivateAccount: false });
+  assert.equal(publicResult.allowed, true);
+  assert.equal(publicResult.mode, 'public-new-conversation');
+  assert.equal(evaluateDirectMessagePermission({ connection: null, initiatorId: 'a', peerId: 'b', recipientPrivateAccount: true }).allowed, false);
   assert.equal(evaluateDirectMessagePermission({ connection: { ...pending, status: 'rejected' }, initiatorId: 'a', peerId: 'b', recipientPrivateAccount: false }).allowed, false);
 });

@@ -82,7 +82,7 @@ const sendConnectionRequest = async (req, res, next) => {
         sender: requesterId,
         connection: connection._id,
         type: 'connection_request',
-        message: `${req.user.name} sent you a connection request.`,
+        message: `${req.user.name} connected with you.`,
         read: false,
         createdAt: new Date()
       } },
@@ -91,7 +91,7 @@ const sendConnectionRequest = async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      message: 'Connection request sent successfully.',
+      message: 'Connected successfully. They can connect back from their notification.',
       connection
     });
   } catch (error) {
