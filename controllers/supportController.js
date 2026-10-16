@@ -1,28 +1,18 @@
 const User = require('../models/User');
 const SupportRequest = require('../models/SupportRequest');
 const { processUploadedFile } = require('../middleware/uploadMiddleware');
+const { consumeLimit, consumeLimitSafe } = require('../utils/apiRateLimit');
 
-const rateWindows = new Map();
 const WINDOW_MS = 60 * 60 * 1000;
 const MAX_PER_WINDOW = 5;
+const DUPLICATE_WINDOW_MS = 10 * 60 * 1000;
 
 const removeTemporaryEvidence = async (files = []) => Promise.all(files.map((file) => require('fs').promises.unlink(file.path).catch(() => {})));
 
-function consumeRateLimit(key, now = Date.now()) {
-  if (rateWindows.size > 10000) {
-    for (const [storedKey, value] of rateWindows) {
-      if (now - value.startedAt >= WINDOW_MS) rateWindows.delete(storedKey);
-      if (rateWindows.size <= 8000) break;
-    }
-  }
-  const current = rateWindows.get(key);
-  if (!current || now - current.startedAt >= WINDOW_MS) {
-    rateWindows.set(key, { startedAt: now, count: 1 });
-    return true;
-  }
-  if (current.count >= MAX_PER_WINDOW) return false;
-  current.count += 1;
-  return true;
+// Persisted per-key limits (see utils/apiRateLimit.js). Kept as a named export
+// because existing tests and future routes share the same support window.
+function consumeRateLimit(key) {
+  return consumeLimit({ key, windowMs: WINDOW_MS, max: MAX_PER_WINDOW });
 }
 
 const createRequest = async (req, res, next) => {
@@ -49,17 +39,43 @@ const createRequest = async (req, res, next) => {
 
     const ipKey = `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
     const emailKey = `email:${normalizedEmail}`;
-    if (!consumeRateLimit(ipKey) || !consumeRateLimit(emailKey)) {
+    const [ipAllowed, emailAllowed] = await Promise.all([
+      consumeLimitSafe({ key: ipKey, windowMs: WINDOW_MS, max: MAX_PER_WINDOW }),
+      consumeLimitSafe({ key: emailKey, windowMs: WINDOW_MS, max: MAX_PER_WINDOW })
+    ]);
+    if (!ipAllowed || !emailAllowed) {
       await removeTemporaryEvidence(evidenceFiles);
       return res.status(429).json({ success: false, message: 'Too many requests. Please try again later.' });
     }
 
+    // Double submissions (double-click, retry after a slow response) would
+    // otherwise create duplicate tickets. The identical request is treated as
+    // already received instead of being stored a second time.
+    const duplicate = await SupportRequest.exists({
+      email: normalizedEmail,
+      type,
+      subject: subject.trim(),
+      message: message.trim(),
+      createdAt: { $gte: new Date(Date.now() - DUPLICATE_WINDOW_MS) }
+    });
+    if (duplicate) {
+      await removeTemporaryEvidence(evidenceFiles);
+      return res.status(200).json({ success: true, message: 'Your request has been received.' });
+    }
+
     let associatedUser = null;
     const tokenUser = req.user;
-    if (tokenUser && tokenUser.email === normalizedEmail) associatedUser = tokenUser._id;
+    if (tokenUser && String(tokenUser.email || '').toLowerCase() === normalizedEmail) associatedUser = tokenUser._id;
     else if (typeof userId === 'string' && /^[a-f\d]{24}$/i.test(userId)) {
       const candidate = await User.findById(userId).select('email moderationStatus');
-      if (candidate?.email === normalizedEmail) associatedUser = candidate._id;
+      if (candidate && String(candidate.email || '').toLowerCase() === normalizedEmail) associatedUser = candidate._id;
+    }
+    // Appeals are often filed by restricted users who can no longer sign in, so
+    // fall back to the exact account email. Without this link an administrator
+    // cannot approve a ban lift later.
+    if (!associatedUser) {
+      const account = await User.findOne({ email: normalizedEmail }).select('_id').lean();
+      if (account) associatedUser = account._id;
     }
 
     const validId = (value) => typeof value === 'string' && /^[a-f\d]{24}$/i.test(value);

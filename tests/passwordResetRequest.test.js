@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const User = require('../models/User');
 const State = require('../models/PasswordResetState');
 const Counter = require('../models/PasswordResetCounter');
-const { requestPasswordReset } = require('../controllers/passwordResetController');
+const { requestPasswordReset, completePasswordReset } = require('../controllers/passwordResetController');
 
 const runRequest = async (knownUser, options = {}) => {
   const envKeys = ['JWT_SECRET', 'PASSWORD_RESET_PEPPER', 'CLIENT_URL', 'BREVO_API_KEY', 'PASSWORD_RESET_FROM'];
@@ -24,7 +24,7 @@ const runRequest = async (knownUser, options = {}) => {
   };
   const response = { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } };
   try {
-    await requestPasswordReset({ body: { email: knownUser ? knownUser.email : 'unknown@example.test' }, ip: '127.0.0.1' }, response, (error) => { throw error; });
+    await requestPasswordReset({ body: { email: knownUser ? knownUser.email : 'unknown@example.test', ...(options.extraBody || {}) }, ip: '127.0.0.1' }, response, (error) => { throw error; });
     return { response, storedUpdate, clearedState, releasedCounter, emailPayload, requestUrl, requestOptions };
   } finally {
     User.findOne = original.findOne; State.findOneAndUpdate = original.stateUpdate; State.updateOne = original.stateClear; Counter.updateOne = original.counterUpdate; Counter.findOneAndUpdate = original.counterFind; global.fetch = original.fetch;
@@ -99,4 +99,31 @@ test('unknown addresses receive the same generic confirmation and no email is se
   assert.equal(result.storedUpdate, undefined);
   const knownResult = await runRequest({ _id: '507f1f77bcf86cd799439011', email: 'permitted-test-recipient@example.test' });
   assert.deepEqual(result.response.body, knownResult.response.body);
+});
+
+test('recovery honeypot keeps the silent generic response without sending mail', async () => {
+  const result = await runRequest({ _id: '507f1f77bcf86cd799439011', email: 'permitted-test-recipient@example.test' }, { extraBody: { website: 'https://spam.example' } });
+  assert.equal(result.response.statusCode, 200);
+  assert.match(result.response.body.message, /If an account matches/);
+  assert.equal(result.emailPayload, undefined);
+  assert.equal(result.storedUpdate, undefined);
+  assert.equal(result.releasedCounter, undefined);
+});
+
+test('completion honeypot is rejected as an invalid code without consuming counters', async () => {
+  const originalCounterUpdate = Counter.updateOne;
+  const originalCounterFindOne = Counter.findOneAndUpdate;
+  let counterTouched = false;
+  Counter.updateOne = async () => { counterTouched = true; return { acknowledged: true }; };
+  Counter.findOneAndUpdate = async () => { counterTouched = true; return { windowStartedAt: new Date() }; };
+  const response = { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } };
+  try {
+    await completePasswordReset({ body: { website: 'https://spam.example', email: 'user@example.test', code: '123456', newPassword: 'newpassword123', confirmPassword: 'newpassword123' }, ip: '127.0.0.1' }, response, (error) => { throw error; });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.body.success, false);
+    assert.equal(counterTouched, false);
+  } finally {
+    Counter.updateOne = originalCounterUpdate;
+    Counter.findOneAndUpdate = originalCounterFindOne;
+  }
 });

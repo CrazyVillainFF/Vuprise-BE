@@ -11,6 +11,8 @@ const { isAdminEmail } = require('../utils/adminAccess');
 const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
 const { requireAdmin } = require('../middleware/authMiddleware');
 const { createRequest, consumeRateLimit } = require('../controllers/supportController');
+const { digestKey } = require('../utils/apiRateLimit');
+const { installRateLimitCounter } = require('./helpers/rateLimitCounterDouble');
 const { overview, listReports, sendSupportReply, updateInboxItem, setVerification, broadcastMessage, listBroadcastMessages, updateBroadcastMessage, removeWarning } = require('../controllers/adminController');
 const AdminBroadcast = require('../models/AdminBroadcast');
 const { listUsers } = require('../controllers/adminController');
@@ -92,8 +94,13 @@ test('warnings return only pending entries and preserve multiple warnings', () =
 
 test('public support intake validates, accepts anonymous appeals, and rate limits', async () => {
   const originalCreate = SupportRequest.create;
+  const originalExists = SupportRequest.exists;
+  const originalUserFindOne = User.findOne;
+  const limiter = installRateLimitCounter();
   let created;
   SupportRequest.create = async (data) => { created = data; return { _id: '507f1f77bcf86cd799439099' }; };
+  SupportRequest.exists = async () => null;
+  User.findOne = () => ({ select: () => ({ lean: async () => null }) });
   try {
     const invalid = response();
     await createRequest({ body: { type: 'general_help', email: 'bad', subject: 'x', message: 'short' }, ip: 'test-ip-a' }, invalid, (error) => { throw error; });
@@ -104,10 +111,160 @@ test('public support intake validates, accepts anonymous appeals, and rate limit
     assert.equal(created.user, null);
     assert.equal(created.type, 'temporary_ban_appeal');
     const key = `unit-${Date.now()}`;
-    for (let i = 0; i < 5; i += 1) assert.equal(consumeRateLimit(key, 1000), true);
-    assert.equal(consumeRateLimit(key, 1000), false);
-    assert.equal(consumeRateLimit(key, 1000 + 60 * 60 * 1000), true);
-  } finally { SupportRequest.create = originalCreate; }
+    for (let i = 0; i < 5; i += 1) assert.equal(await consumeRateLimit(key), true);
+    assert.equal(await consumeRateLimit(key), false);
+    limiter.state.get(digestKey(key)).startedAt = Date.now() - 61 * 60 * 1000;
+    assert.equal(await consumeRateLimit(key), true);
+  } finally {
+    SupportRequest.create = originalCreate;
+    SupportRequest.exists = originalExists;
+    User.findOne = originalUserFindOne;
+    limiter.restore();
+  }
+});
+
+test('contact-form honeypot submissions are acknowledged without creating a request', async () => {
+  const originalCreate = SupportRequest.create;
+  const originalExists = SupportRequest.exists;
+  const originalUserFindOne = User.findOne;
+  const limiter = installRateLimitCounter();
+  let created = false;
+  SupportRequest.create = async () => { created = true; return { _id: '507f1f77bcf86cd799439066' }; };
+  SupportRequest.exists = async () => null;
+  User.findOne = () => ({ select: () => ({ lean: async () => null }) });
+  try {
+    const honeypot = response();
+    await createRequest({ body: { type: 'general_help', email: 'bot@example.com', subject: 'Buy cheap things now', message: 'An automated spam submission used to verify the honeypot.', website: 'https://spam.example' }, ip: 'test-ip-bot' }, honeypot, (error) => { throw error; });
+    assert.equal(honeypot.statusCode, 202);
+    assert.equal(created, false);
+  } finally {
+    SupportRequest.create = originalCreate;
+    SupportRequest.exists = originalExists;
+    User.findOne = originalUserFindOne;
+    limiter.restore();
+  }
+});
+
+test('identical support submissions inside the duplicate window are not stored twice', async () => {
+  const originalCreate = SupportRequest.create;
+  const originalExists = SupportRequest.exists;
+  const originalUserFindOne = User.findOne;
+  const limiter = installRateLimitCounter();
+  let createCalls = 0;
+  let duplicateFilter;
+  SupportRequest.create = async () => { createCalls += 1; return { _id: '507f1f77bcf86cd799439088' }; };
+  SupportRequest.exists = async (filter) => { duplicateFilter = filter; return { _id: '507f1f77bcf86cd799439055' }; };
+  User.findOne = () => ({ select: () => ({ lean: async () => null }) });
+  try {
+    const duplicate = response();
+    await createRequest({ body: { type: 'general_help', email: 'User@Example.com', subject: 'Need help with my account', message: 'I cannot access my account settings since yesterday.' }, ip: 'test-ip-dupe' }, duplicate, (error) => { throw error; });
+    assert.equal(duplicate.statusCode, 200);
+    assert.equal(createCalls, 0);
+    assert.equal(duplicateFilter.email, 'user@example.com');
+    assert.ok(duplicateFilter.createdAt.$gte instanceof Date);
+  } finally {
+    SupportRequest.create = originalCreate;
+    SupportRequest.exists = originalExists;
+    User.findOne = originalUserFindOne;
+    limiter.restore();
+  }
+});
+
+test('support intake refuses new requests once a window key is exhausted', async () => {
+  const originalCreate = SupportRequest.create;
+  const originalExists = SupportRequest.exists;
+  const originalUserFindOne = User.findOne;
+  const limiter = installRateLimitCounter();
+  SupportRequest.create = async () => ({ _id: '507f1f77bcf86cd799439077' });
+  SupportRequest.exists = async () => null;
+  User.findOne = () => ({ select: () => ({ lean: async () => null }) });
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      const accepted = response();
+      await createRequest({ body: { type: 'general_help', email: 'limit@example.com', subject: `Support request number ${i + 1}`, message: 'This request exists to exercise the intake window limit.' }, ip: 'test-ip-limit' }, accepted, (error) => { throw error; });
+      assert.equal(accepted.statusCode, 201);
+    }
+    const blocked = response();
+    await createRequest({ body: { type: 'general_help', email: 'limit@example.com', subject: 'Support request number 6', message: 'This request should be refused by the intake window limit.' }, ip: 'test-ip-limit' }, blocked, (error) => { throw error; });
+    assert.equal(blocked.statusCode, 429);
+  } finally {
+    SupportRequest.create = originalCreate;
+    SupportRequest.exists = originalExists;
+    User.findOne = originalUserFindOne;
+    limiter.restore();
+  }
+});
+
+test('appeals filed while signed out link to the exact account email', async () => {
+  const originalCreate = SupportRequest.create;
+  const originalExists = SupportRequest.exists;
+  const originalUserFindOne = User.findOne;
+  const limiter = installRateLimitCounter();
+  const accountId = '507f1f77bcf86cd799439021';
+  let created;
+  SupportRequest.create = async (data) => { created = data; return { _id: '507f1f77bcf86cd799439022' }; };
+  SupportRequest.exists = async () => null;
+  User.findOne = () => ({ select: () => ({ lean: async () => ({ _id: accountId }) }) });
+  try {
+    const accepted = response();
+    await createRequest({ body: { type: 'permanent_ban_appeal', email: 'Banned@Example.com', subject: 'Please review my ban', message: 'I believe the restriction on my account is a mistake.' }, ip: 'test-ip-link' }, accepted, (error) => { throw error; });
+    assert.equal(accepted.statusCode, 201);
+    assert.equal(created.user, accountId);
+    assert.equal(created.email, 'banned@example.com');
+  } finally {
+    SupportRequest.create = originalCreate;
+    SupportRequest.exists = originalExists;
+    User.findOne = originalUserFindOne;
+    limiter.restore();
+  }
+});
+
+test('reviewing an unlinked appeal links the account by email before lifting the ban', async () => {
+  const originals = { findById: SupportRequest.findById, userFindOne: User.findOne, userFindById: User.findById, userUpdateOne: User.updateOne, auditCreate: AdminAuditLog.create };
+  const adminId = '507f1f77bcf86cd799439011';
+  const accountId = '507f1f77bcf86cd799439012';
+  let updateQuery; let updateChange;
+  const appeal = { _id: '507f1f77bcf86cd799439023', type: 'temporary_ban_appeal', email: 'banned@example.com', user: null, status: 'pending', priority: 'normal', resolution: '', save: async function save() { this.saved = true; } };
+  SupportRequest.findById = async () => appeal;
+  User.findOne = () => ({ select: () => ({ lean: async () => ({ _id: accountId }) }) });
+  User.findById = () => ({ select: async () => ({ _id: accountId, moderationStatus: 'temporary_ban', moderationExpiresAt: new Date(Date.now() + 86400000), moderationReason: 'spam' }) });
+  User.updateOne = async (query, change) => { updateQuery = query; updateChange = change; return { modifiedCount: 1 }; };
+  AdminAuditLog.create = async (entry) => entry;
+  try {
+    const res = response();
+    await updateInboxItem({ params: { id: appeal._id }, body: { status: 'approved', outcome: 'lift_temporary_ban' }, user: { _id: adminId } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 200);
+    assert.equal(String(appeal.user), accountId);
+    assert.equal(updateQuery.moderationStatus, 'temporary_ban');
+    assert.equal(updateChange.$set.moderationStatus, 'active');
+    assert.equal(res.body.request.resolutionOutcome, 'lift_temporary_ban');
+    assert.equal(appeal.saved, true);
+  } finally {
+    SupportRequest.findById = originals.findById;
+    User.findOne = originals.userFindOne;
+    User.findById = originals.userFindById;
+    User.updateOne = originals.userUpdateOne;
+    AdminAuditLog.create = originals.auditCreate;
+  }
+});
+
+test('lifting a ban for an appeal with no matching account stays blocked with guidance', async () => {
+  const originals = { findById: SupportRequest.findById, userFindOne: User.findOne, auditCreate: AdminAuditLog.create };
+  const appeal = { _id: '507f1f77bcf86cd799439024', type: 'permanent_ban_appeal', email: 'stranger@example.com', user: null, status: 'pending', priority: 'normal', resolution: '', save: async function save() { this.saved = true; } };
+  SupportRequest.findById = async () => appeal;
+  User.findOne = () => ({ select: () => ({ lean: async () => null }) });
+  AdminAuditLog.create = async (entry) => entry;
+  try {
+    const res = response();
+    await updateInboxItem({ params: { id: appeal._id }, body: { status: 'approved', outcome: 'lift_permanent_ban' }, user: { _id: '507f1f77bcf86cd799439011' } }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 409);
+    assert.match(res.body.message, /Reply only/);
+    assert.equal(appeal.saved, undefined);
+  } finally {
+    SupportRequest.findById = originals.findById;
+    User.findOne = originals.userFindOne;
+    AdminAuditLog.create = originals.auditCreate;
+  }
 });
 
 test('admin user list selects only safe profile/moderation fields and paginates', async () => {
@@ -216,6 +373,62 @@ test('admin broadcast creates an individual official Vuprise thread for each sel
     Notification.insertMany = originals.notificationInsertMany;
     AdminAuditLog.create = originals.auditCreate;
     AdminBroadcast.create = originals.broadcastCreate;
+  }
+});
+
+test('official broadcasts persist the uploaded attachment URL on messages and history', async () => {
+  const os = require('os');
+  const pathModule = require('path');
+  const fsPromises = require('fs/promises');
+  const originals = {
+    userFind: User.find,
+    conversationBulkWrite: Conversation.bulkWrite,
+    conversationFind: Conversation.find,
+    conversationUpdateMany: Conversation.updateMany,
+    messageInsertMany: DirectMessage.insertMany,
+    notificationInsertMany: Notification.insertMany,
+    auditCreate: AdminAuditLog.create,
+    broadcastCreate: AdminBroadcast.create,
+  };
+  const adminId = '507f1f77bcf86cd799439011';
+  const recipientId = '507f1f77bcf86cd799439012';
+  const threadId = '507f1f77bcf86cd799439013';
+  let insertedMessages; let savedBroadcast; let storedFilename;
+  const tempPath = pathModule.join(os.tmpdir(), `vuprise-broadcast-${Date.now()}.png`);
+  await fsPromises.writeFile(tempPath, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0]));
+  User.find = () => ({ select: () => ({ lean: async () => [{ _id: recipientId }] }) });
+  Conversation.bulkWrite = async () => ({});
+  Conversation.find = () => ({ select: () => ({ lean: async () => [{ _id: threadId, officialRecipient: recipientId, officialSender: adminId }] }) });
+  Conversation.updateMany = async () => ({ modifiedCount: 1 });
+  DirectMessage.insertMany = async (messages) => { insertedMessages = messages; return messages; };
+  Notification.insertMany = async () => [];
+  AdminAuditLog.create = async (entry) => entry;
+  AdminBroadcast.create = async (entry) => { savedBroadcast = entry; return entry; };
+  try {
+    const res = response();
+    await broadcastMessage({
+      body: { text: 'With an attachment', recipientIds: [recipientId] },
+      user: { _id: adminId },
+      protocol: 'https',
+      get: () => 'vuprise.test',
+      file: { path: tempPath, filename: 'official.png', mimetype: 'image/png' },
+    }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 201);
+    assert.match(insertedMessages[0].imageUrl, /^https:\/\/vuprise\.test\/uploads\/media-\d+-[0-9a-f]+\.png$/);
+    assert.equal(savedBroadcast.imageUrl, insertedMessages[0].imageUrl);
+    assert.equal(savedBroadcast.imagePublicId, '');
+    storedFilename = pathModule.basename(new URL(insertedMessages[0].imageUrl).pathname);
+  } finally {
+    User.find = originals.userFind;
+    Conversation.bulkWrite = originals.conversationBulkWrite;
+    Conversation.find = originals.conversationFind;
+    Conversation.updateMany = originals.conversationUpdateMany;
+    DirectMessage.insertMany = originals.messageInsertMany;
+    Notification.insertMany = originals.notificationInsertMany;
+    AdminAuditLog.create = originals.auditCreate;
+    AdminBroadcast.create = originals.broadcastCreate;
+    await fsPromises.unlink(tempPath).catch(() => {});
+    if (storedFilename) await fsPromises.unlink(pathModule.join(__dirname, '..', 'uploads', storedFilename)).catch(() => {});
   }
 });
 

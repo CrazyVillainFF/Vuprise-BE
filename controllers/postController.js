@@ -403,15 +403,21 @@ const toggleLikePost = async (req, res, next) => {
       // Like
       post.likes.push(userId);
 
-      // Create notification for post author (if not self)
+      // Notifications are best-effort: the like itself must persist even if the
+      // notification write fails, otherwise the like is silently lost and a
+      // retry could double-count it.
       if (post.author.toString() !== userId.toString()) {
-        await Notification.create({
-          recipient: post.author,
-          sender: userId,
-          type: 'post_like',
-          post: post._id,
-          message: `${req.user.name} liked your post.`
-        });
+        try {
+          await Notification.create({
+            recipient: post.author,
+            sender: userId,
+            type: 'post_like',
+            post: post._id,
+            message: `${req.user.name} liked your post.`
+          });
+        } catch (notificationError) {
+          console.warn('[Post like] Notification could not be created:', notificationError.message);
+        }
       }
     }
 

@@ -34,38 +34,68 @@ const fileFilter = (req, file, cb) => {
   }
 };
 
-const validateImageContent = (req, res, next) => {
+const detectImageType = (filePath) => {
+  const signature = Buffer.alloc(12);
+  const descriptor = fs.openSync(filePath, 'r');
+  try { fs.readSync(descriptor, signature, 0, signature.length, 0); }
+  finally { fs.closeSync(descriptor); }
+  if (signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff) return 'jpeg';
+  if (signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'png';
+  if (/^GIF8[79]a$/.test(signature.subarray(0, 6).toString('ascii'))) return 'gif';
+  if (signature.subarray(0, 4).toString('ascii') === 'RIFF' && signature.subarray(8, 12).toString('ascii') === 'WEBP') return 'webp';
+  return null;
+};
+
+// Server-side content check. Declared MIME types and filenames are never
+// trusted on their own: the stored bytes must carry a supported image header.
+const imageContentValidator = ({
+  allowed = ['jpeg', 'png', 'gif', 'webp'],
+  message = 'The uploaded file is not a valid JPEG, PNG, WEBP, or GIF image.'
+} = {}) => (req, res, next) => {
   const files = [...(req.files || []), ...(req.file ? [req.file] : [])];
   if (!files.length) return next();
   for (const file of files) {
     if (file.mimetype?.startsWith('video/')) continue;
-    let valid = false;
-    try {
-      const signature = Buffer.alloc(12);
-      const descriptor = fs.openSync(file.path, 'r');
-      try { fs.readSync(descriptor, signature, 0, signature.length, 0); }
-      finally { fs.closeSync(descriptor); }
-      const bytes = [...signature];
-      const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-      const isPng = signature.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-      const isGif = signature.subarray(0, 6).toString('ascii').match(/^GIF8[79]a$/);
-      const isWebp = signature.subarray(0, 4).toString('ascii') === 'RIFF' && signature.subarray(8, 12).toString('ascii') === 'WEBP';
-      valid = isJpeg || isPng || isGif || isWebp;
-    } catch { valid = false; }
+    let detected = null;
+    try { detected = detectImageType(file.path); } catch { detected = null; }
 
-    if (!valid) {
+    if (!detected || !allowed.includes(detected)) {
       files.forEach((uploaded) => fs.unlink(uploaded.path, () => {}));
-      return res.status(400).json({ success: false, message: 'The uploaded file is not a valid JPEG, PNG, WEBP, or GIF image.' });
+      return res.status(400).json({ success: false, message });
     }
   }
   return next();
 };
+
+const validateImageContent = imageContentValidator();
+
+const validateBroadcastImage = imageContentValidator({
+  allowed: ['jpeg', 'png', 'webp'],
+  message: 'The uploaded file is not a valid JPG, PNG, or WebP image.'
+});
 
 const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
   fileFilter
 });
+
+// Official Vuprise messages only accept one JPG/PNG/WebP attachment (5MB).
+const broadcastUpload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const imageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    if (imageTypes.includes(file.mimetype)) return cb(null, true);
+    const error = new Error('Official message attachments must be JPG, PNG, or WebP images.');
+    error.statusCode = 415;
+    return cb(error);
+  }
+});
+
+const discardUploadedFile = async (file) => {
+  if (file?.path) await fs.promises.unlink(file.path).catch(() => {});
+};
 
 const supportUpload = multer({
   storage,
@@ -168,4 +198,4 @@ const deleteUploadedMedia = async ({ publicId, url, resourceType = 'image' } = {
   }
 };
 
-module.exports = { upload, supportUpload, postUpload, preparePostUpload, processUploadedFile, processUploadedMedia, deleteUploadedMedia, validateImageContent };
+module.exports = { upload, supportUpload, postUpload, broadcastUpload, preparePostUpload, processUploadedFile, processUploadedMedia, deleteUploadedMedia, detectImageType, validateImageContent, validateBroadcastImage, discardUploadedFile };

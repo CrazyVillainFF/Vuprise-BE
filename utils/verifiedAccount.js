@@ -8,4 +8,4 @@ const isVerifiedAccount = (value) => {
   return typeof email === 'string' && email.trim().toLowerCase() === VERIFIED_EMAIL;
 };
 
-module.exports = { isVerifiedAccount };
+module.exports = { isVerifiedAccount, VERIFIED_EMAIL };

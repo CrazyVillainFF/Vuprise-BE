@@ -89,13 +89,16 @@ const sendResetEmail = async (to, resetCode, mailConfig) => {
 
 const requestPasswordReset = async (req, res, next) => {
   try {
+    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const generic = () => res.status(200).json({ success: true, message: genericRequestMessage });
+    // Honeypot field: a value here means an automated submission, so answer
+    // with the same generic response and skip mail and counters entirely.
+    if (typeof req.body.website === 'string' && req.body.website.trim()) return generic();
     if (!process.env.JWT_SECRET || !pepper()) {
       return res.status(503).json({ success: false, message: 'Password recovery is temporarily unavailable.' });
     }
     const mailConfig = getMailConfiguration();
     if (mailConfig.error) return res.status(503).json({ success: false, message: mailConfig.error });
-    const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
-    const generic = () => res.status(200).json({ success: true, message: genericRequestMessage });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return generic();
 
     const ipSlot = await reserveCounter(ipKey(req.ip), 20);
@@ -140,12 +143,14 @@ const requestPasswordReset = async (req, res, next) => {
 
 const completePasswordReset = async (req, res, next) => {
   try {
+    const invalidCode = () => res.status(400).json({ success: false, message: 'The reset code is invalid, expired, or has reached its attempt limit.' });
+    // Honeypot field: automated submissions are rejected like an invalid code.
+    if (typeof req.body.website === 'string' && req.body.website.trim()) return invalidCode();
     if (!(await reserveCounter(ipKey(req.ip), 100))) {
       return res.status(429).json({ success: false, message: 'Too many reset attempts. Try again later.' });
     }
     const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
     const { code, newPassword, confirmPassword } = req.body;
-    const invalidCode = () => res.status(400).json({ success: false, message: 'The reset code is invalid, expired, or has reached its attempt limit.' });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || typeof code !== 'string' || !/^\d{6}$/.test(code)) return invalidCode();
     if (typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 128) {
       return res.status(400).json({ success: false, message: 'Password must be between 8 and 128 characters.' });

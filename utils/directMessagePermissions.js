@@ -9,9 +9,16 @@ const messageDenied = (message) => ({ allowed: false, message });
 const evaluateDirectMessagePermission = ({ connection, initiatorId, peerId, recipientPrivateAccount, conversationInitiatedBy }) => {
   // Public accounts may receive a first message. Private-account messaging is
   // still enforced on the server and cannot be bypassed by the client.
-  if (!connection) return recipientPrivateAccount
-    ? messageDenied('This private account requires a connection before messaging.')
-    : { allowed: true, mode: 'public-new-conversation' };
+  if (!connection) {
+    // A conversation can only exist if it was created through a permitted
+    // path, so both participants keep access to it. This lets a public
+    // recipient reply to a private member who started the conversation first
+    // (and keeps their inbox in sync after a privacy change).
+    if (conversationInitiatedBy) return { allowed: true, mode: 'existing-permitted-conversation' };
+    return recipientPrivateAccount
+      ? messageDenied('This private account requires a connection before messaging.')
+      : { allowed: true, mode: 'public-new-conversation' };
+  }
   if (connection.status === 'accepted') return { allowed: true, mode: 'mutual' };
   if (connection.status !== 'pending') return messageDenied('This connection is no longer available for messaging.');
 

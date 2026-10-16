@@ -3,6 +3,12 @@ const User = require('../models/User');
 const { isVerifiedAccount } = require('../utils/verifiedAccount');
 const { isAdminEmail } = require('../utils/adminAccess');
 const { getAccountRestriction, getPendingWarnings } = require('../utils/accountModeration');
+const { consumeLimitSafe } = require('../utils/apiRateLimit');
+
+const REGISTER_WINDOW_MS = 60 * 60 * 1000;
+const REGISTER_MAX_PER_WINDOW = 20;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 10;
 
 const generateToken = (user) => {
   if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET must be configured before issuing a session.');
@@ -16,7 +22,22 @@ const generateToken = (user) => {
 // @access  Public
 const register = async (req, res, next) => {
   try {
-    const { name, email, password, confirmPassword, company, jobTitle, location, accountType, schoolName, course, courseStartYear } = req.body;
+    const { name, email, password, confirmPassword, company, jobTitle, location, accountType, schoolName, course, courseStartYear, website = '' } = req.body;
+
+    // Honeypot field: real sign-up forms never fill a field hidden from users,
+    // so a value here identifies an automated submission.
+    if (typeof website === 'string' && website.trim()) {
+      return res.status(400).json({ success: false, message: 'Registration could not be completed. Check the form and try again.' });
+    }
+
+    const registerAllowed = await consumeLimitSafe({
+      key: `register:${req.ip || req.socket?.remoteAddress || 'unknown'}`,
+      windowMs: REGISTER_WINDOW_MS,
+      max: REGISTER_MAX_PER_WINDOW
+    });
+    if (!registerAllowed) {
+      return res.status(429).json({ success: false, message: 'Too many accounts were created from this connection. Please try again later.' });
+    }
 
     if (!name || !email || !password) {
       return res.status(400).json({
@@ -112,7 +133,18 @@ const register = async (req, res, next) => {
 // @access  Public
 const login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, website = '' } = req.body;
+
+    const invalidCredentials = {
+      success: false,
+      message: 'Invalid email or password. Please check your credentials and try again.'
+    };
+
+    // Honeypot field: automated submissions get the same response as a wrong
+    // password so the trap is not revealed.
+    if (typeof website === 'string' && website.trim()) {
+      return res.status(401).json(invalidCredentials);
+    }
 
     if (!email || !password) {
       return res.status(400).json({
@@ -121,22 +153,30 @@ const login = async (req, res, next) => {
       });
     }
 
+    // Failed attempts are counted per connection + email and are throttled
+    // before the password comparison result can be used for guessing.
+    const failedLoginAllowed = async () => consumeLimitSafe({
+      key: `login:${req.ip || req.socket?.remoteAddress || 'unknown'}:${email.toLowerCase().trim()}`,
+      windowMs: LOGIN_WINDOW_MS,
+      max: LOGIN_MAX_FAILURES
+    });
+
     // Check user exists with password field selected
     const user = await User.findOne({ email: email.toLowerCase().trim() }).select('+password +hideActivity +inactivityRemindersEnabled +moderationStatus +moderationExpiresAt +moderationReason +moderationWarnings');
 
     if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password. Please check your credentials and try again.'
-      });
+      if (!(await failedLoginAllowed())) {
+        return res.status(429).json({ success: false, message: 'Too many sign-in attempts. Please wait a few minutes and try again.' });
+      }
+      return res.status(401).json(invalidCredentials);
     }
 
     const isMatch = await user.matchPassword(password);
     if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password. Please check your credentials and try again.'
-      });
+      if (!(await failedLoginAllowed())) {
+        return res.status(429).json({ success: false, message: 'Too many sign-in attempts. Please wait a few minutes and try again.' });
+      }
+      return res.status(401).json(invalidCredentials);
     }
 
     const restriction = await getAccountRestriction(user);

@@ -57,15 +57,21 @@ const addComment = async (req, res, next) => {
     const populatedComment = await Comment.findById(comment._id)
       .populate('author', authorFields);
 
-    // Create notification if commenter is not post author
+    // Notifications are best-effort: the comment is already saved, so a
+    // notification hiccup must not turn a successful save into an error
+    // response (which would prompt a duplicate retry from the client).
     if (post.author.toString() !== req.user._id.toString()) {
-      await Notification.create({
-        recipient: post.author,
-        sender: req.user._id,
-        type: 'post_comment',
-        post: post._id,
-        message: `${req.user.name} commented on your post: "${content.trim().substring(0, 40)}${content.length > 40 ? '...' : ''}"`
-      });
+      try {
+        await Notification.create({
+          recipient: post.author,
+          sender: req.user._id,
+          type: 'post_comment',
+          post: post._id,
+          message: `${req.user.name} commented on your post: "${content.trim().substring(0, 40)}${content.length > 40 ? '...' : ''}"`
+        });
+      } catch (notificationError) {
+        console.warn('[Post comment] Notification could not be created:', notificationError.message);
+      }
     }
 
     res.status(201).json({

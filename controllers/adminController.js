@@ -12,12 +12,44 @@ const PasswordResetState = require('../models/PasswordResetState');
 const SupportRequest = require('../models/SupportRequest');
 const AdminAuditLog = require('../models/AdminAuditLog');
 const AdminBroadcast = require('../models/AdminBroadcast');
-const { deleteUploadedMedia } = require('../middleware/uploadMiddleware');
-const { isVerifiedAccount } = require('../utils/verifiedAccount');
+const { deleteUploadedMedia, discardUploadedFile, processUploadedMedia } = require('../middleware/uploadMiddleware');
+const { isVerifiedAccount, VERIFIED_EMAIL } = require('../utils/verifiedAccount');
 
 const fail = (res, status, message) => res.status(status).json({ success: false, message });
 const validId = (id) => mongoose.Types.ObjectId.isValid(id);
 const safeReason = (reason) => typeof reason === 'string' ? reason.trim().slice(0, 1000) : '';
+
+// Authoritative verified-account filter: the stored flag wins, and the legacy
+// configured account is treated as verified exactly like utils/verifiedAccount.
+const verifiedRecipientFilter = () => ({ $or: [{ isVerifiedAccount: true }, { email: { $regex: `^${VERIFIED_EMAIL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } }] });
+
+// Bulk email is sent with one provider request per recipient (privacy), so the
+// synchronous budget stays far below the in-app official-message limit.
+const MAX_EMAIL_RECIPIENTS = 200;
+const EMAIL_ADDRESS_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// Official message sends are expensive (up to 10,000 recipients each), so keep
+// a per-administrator submit budget on top of the route-level authorization.
+const broadcastWindows = new Map();
+const BROADCAST_WINDOW_MS = 60 * 60 * 1000;
+const MAX_BROADCASTS_PER_WINDOW = 30;
+
+const consumeBroadcastRateLimit = (key, now = Date.now()) => {
+  if (broadcastWindows.size > 5000) {
+    for (const [storedKey, value] of broadcastWindows) {
+      if (now - value.startedAt >= BROADCAST_WINDOW_MS) broadcastWindows.delete(storedKey);
+      if (broadcastWindows.size <= 4000) break;
+    }
+  }
+  const current = broadcastWindows.get(key);
+  if (!current || now - current.startedAt >= BROADCAST_WINDOW_MS) {
+    broadcastWindows.set(key, { startedAt: now, count: 1 });
+    return true;
+  }
+  if (current.count >= MAX_BROADCASTS_PER_WINDOW) return false;
+  current.count += 1;
+  return true;
+};
 
 const overview = async (_req, res, next) => {
   try {
@@ -45,6 +77,7 @@ const listUsers = async (req, res, next) => {
     if (status === 'active') filter.$and = [{ $or: [{ moderationStatus: 'active' }, { moderationStatus: { $exists: false } }] }];
     else if (['temporary_ban', 'permanent_ban', 'deletion_pending', 'deleted'].includes(status)) filter.moderationStatus = status;
     else if (status === 'banned') filter.moderationStatus = { $in: ['temporary_ban', 'permanent_ban'] };
+    if (req.query.verifiedOnly === 'true') filter.$and = [...(filter.$and || []), verifiedRecipientFilter()];
     const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 120) : '';
     if (search) {
       const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -113,27 +146,54 @@ const setVerification = async (req, res, next) => {
 };
 
 const broadcastMessage = async (req, res, next) => {
+  let media = null;
+  let sentAt = null;
+  let threadIds = [];
+  // Undo this attempt only: the temporary upload, the stored image, and any
+  // recipient messages inserted under this attempt's exact timestamp. This
+  // keeps a failed send from delivering a partial official message or leaving
+  // an orphaned upload behind.
+  const rollbackAttempt = async () => {
+    await discardUploadedFile(req.file);
+    if (media) await deleteUploadedMedia({ publicId: media.publicId, url: media.url }).catch(() => {});
+    if (sentAt && threadIds.length) {
+      await DirectMessage.deleteMany({ conversation: { $in: threadIds }, sender: req.user._id, createdAt: sentAt }).catch(() => {});
+    }
+  };
+  const reject = async (status, message) => {
+    await rollbackAttempt();
+    return fail(res, status, message);
+  };
   try {
+    if (!consumeBroadcastRateLimit(`broadcast:${req.user._id}`)) {
+      return reject(429, 'Too many official messages were sent recently. Please try again later.');
+    }
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
-    const selectAll = req.body?.selectAll === true;
-    const recipientIds = req.body?.recipientIds;
-    if (!text || text.length > 5000) return fail(res, 400, 'Enter a message from 1 to 5000 characters.');
-    if (selectAll && Array.isArray(recipientIds) && recipientIds.length) return fail(res, 400, 'Choose all users or selected users, not both.');
+    const selectAll = req.body?.selectAll === true || String(req.body?.selectAll) === 'true';
+    const verifiedOnly = req.body?.verifiedOnly === true || String(req.body?.verifiedOnly) === 'true';
+    let recipientIds = req.body?.recipientIds;
+    if (typeof recipientIds === 'string') recipientIds = [recipientIds];
+    const hasImage = Boolean(req.file);
+    if (text.length > 5000) return reject(400, 'Enter a message from 1 to 5000 characters.');
+    if (!text && !hasImage) return reject(400, 'Enter a message from 1 to 5000 characters or attach an image.');
+    if (selectAll && Array.isArray(recipientIds) && recipientIds.length) return reject(400, 'Choose all users or selected users, not both.');
     if (!selectAll && (!Array.isArray(recipientIds) || recipientIds.length < 1 || recipientIds.length > 10000 || recipientIds.some((id) => !validId(id)))) {
-      return fail(res, 400, 'Select between 1 and 10,000 valid recipient accounts, or choose all users.');
+      return reject(400, 'Select between 1 and 10,000 valid recipient accounts, or choose all users.');
     }
 
     const recipients = await User.find(selectAll
-      ? { _id: { $ne: req.user._id }, moderationStatus: { $ne: 'deleted' } }
-      : { _id: { $in: [...new Set(recipientIds.map(String))], $ne: req.user._id }, moderationStatus: { $ne: 'deleted' } }
+      ? { _id: { $ne: req.user._id }, moderationStatus: { $ne: 'deleted' }, ...(verifiedOnly ? verifiedRecipientFilter() : {}) }
+      : { _id: { $in: [...new Set(recipientIds.map(String))], $ne: req.user._id }, moderationStatus: { $ne: 'deleted' }, ...(verifiedOnly ? verifiedRecipientFilter() : {}) }
     ).select('_id').lean();
     if (!selectAll && recipients.length !== new Set(recipientIds.map(String).filter((id) => id !== String(req.user._id))).size) {
-      return fail(res, 404, 'One or more selected accounts no longer exist. Refresh the user list and try again.');
+      return reject(404, verifiedOnly ? 'One or more selected accounts are missing or no longer verified. Refresh the user list and try again.' : 'One or more selected accounts no longer exist. Refresh the user list and try again.');
     }
-    if (!recipients.length) return fail(res, 400, 'There are no eligible recipient accounts.');
-    if (recipients.length > 10000) return fail(res, 413, 'This all-user message exceeds the current 10,000-recipient limit.');
+    if (!recipients.length) return reject(400, 'There are no eligible recipient accounts.');
+    if (recipients.length > 10000) return reject(413, 'This all-user message exceeds the current 10,000-recipient limit.');
 
-    const sentAt = new Date();
+    if (req.file) media = await processUploadedMedia(req.file, req, 'official-messages');
+
+    sentAt = new Date();
     const recipientObjectIds = recipients.map(({ _id }) => _id);
     const pairKeys = recipientObjectIds.map((id) => `official:${id}`);
     const upserts = recipients.map(({ _id }) => ({
@@ -152,20 +212,26 @@ const broadcastMessage = async (req, res, next) => {
     }
     const threads = await Conversation.find({ pairKey: { $in: pairKeys }, isOfficialBroadcast: true }).select('_id officialRecipient officialSender').lean();
     const threadByRecipient = new Map(threads.map((thread) => [String(thread.officialRecipient), thread]));
+    threadIds = threads.map(({ _id }) => _id);
     const messages = recipients.map(({ _id }) => ({
       conversation: threadByRecipient.get(String(_id))?._id,
       sender: threadByRecipient.get(String(_id))?.officialSender,
       text,
+      imageUrl: media?.url || '',
+      imagePublicId: media?.publicId || '',
       readBy: [threadByRecipient.get(String(_id))?.officialSender],
       createdAt: sentAt,
       updatedAt: sentAt
     }));
-    if (messages.some((message) => !message.conversation)) return fail(res, 500, 'The official message inbox could not be prepared. Please try again.');
+    if (messages.some((message) => !message.conversation)) return reject(500, 'The official message inbox could not be prepared. Please try again.');
     for (let offset = 0; offset < messages.length; offset += 500) {
       await DirectMessage.insertMany(messages.slice(offset, offset + 500));
     }
-    await AdminBroadcast.create({ admin: req.user._id, text, recipients: recipientObjectIds, recipientCount: recipients.length, createdAt: sentAt });
-    await Conversation.updateMany({ _id: { $in: threads.map(({ _id }) => _id) } }, { $set: { lastMessageAt: sentAt } });
+    await AdminBroadcast.create({
+      admin: req.user._id, text, recipients: recipientObjectIds, recipientCount: recipients.length, createdAt: sentAt,
+      imageUrl: media?.url || '', imagePublicId: media?.publicId || ''
+    });
+    await Conversation.updateMany({ _id: { $in: threadIds } }, { $set: { lastMessageAt: sentAt } });
     const officialNotifications = recipients.map(({ _id }) => ({
       recipient: _id,
       sender: threadByRecipient.get(String(_id)).officialSender,
@@ -174,12 +240,22 @@ const broadcastMessage = async (req, res, next) => {
       message: 'Vuprise sent you an official message.',
       read: false
     }));
-    for (let offset = 0; offset < officialNotifications.length; offset += 500) {
-      await Notification.insertMany(officialNotifications.slice(offset, offset + 500));
+    // Notifications are best-effort: the official message itself is already
+    // delivered, so a notification hiccup must not fail the send (which would
+    // tempt a retry and duplicate the delivered message).
+    try {
+      for (let offset = 0; offset < officialNotifications.length; offset += 500) {
+        await Notification.insertMany(officialNotifications.slice(offset, offset + 500));
+      }
+    } catch (notificationError) {
+      console.warn('[Official message] Recipient notifications could not be created:', notificationError.message);
     }
-    await logAction(req, null, 'broadcast_message', '', null, null, `${recipients.length} recipient(s)`);
-    res.status(201).json({ success: true, recipientCount: recipients.length, message: `Official Vuprise message sent to ${recipients.length} ${recipients.length === 1 ? 'user' : 'users'}.` });
-  } catch (error) { next(error); }
+    await logAction(req, null, 'broadcast_message', '', null, null, `${recipients.length} recipient(s)${media ? ' with image' : ''}`);
+    res.status(201).json({ success: true, recipientCount: recipients.length, imageUrl: media?.url || '', message: `Official Vuprise message sent to ${recipients.length} ${recipients.length === 1 ? 'user' : 'users'}.` });
+  } catch (error) {
+    await rollbackAttempt();
+    next(error);
+  }
 };
 
 const listBroadcastMessages = async (req, res, next) => {
@@ -198,6 +274,8 @@ const listBroadcastMessages = async (req, res, next) => {
         messages: broadcasts.map((broadcast) => ({
           _id: broadcast._id,
           text: broadcast.text,
+          imageUrl: broadcast.imageUrl || '',
+          imagePublicId: broadcast.imagePublicId || '',
           createdAt: broadcast.createdAt,
           recipientCount: broadcast.recipientCount,
           recipients: broadcast.recipients || [],
@@ -242,11 +320,12 @@ const listBroadcastMessages = async (req, res, next) => {
 const updateBroadcastMessage = async (req, res, next) => {
   try {
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
-    if (!text || text.length > 5000) return fail(res, 400, 'Enter a message of 1 to 5000 characters.');
+    if (text.length > 5000) return fail(res, 400, 'Enter a message of 1 to 5000 characters.');
     if (!validId(req.params.id)) return fail(res, 400, 'Invalid official message ID.');
 
     const broadcast = await AdminBroadcast.findOne({ _id: req.params.id, admin: req.user._id });
     if (broadcast) {
+      if (!text && !broadcast.imageUrl) return fail(res, 400, 'Enter a message of 1 to 5000 characters.');
       const recipientIds = broadcast.recipients || [];
       const pairKeys = recipientIds.map((recipientId) => `official:${recipientId}`);
       const conversations = pairKeys.length ? await Conversation.find({
@@ -269,6 +348,7 @@ const updateBroadcastMessage = async (req, res, next) => {
     // Legacy official messages are stored only as individual direct messages.
     const message = await DirectMessage.findOne({ _id: req.params.id, sender: req.user._id, deletedForEveryone: { $ne: true } });
     if (!message) return fail(res, 404, 'Official message not found.');
+    if (!text && !message.imageUrl) return fail(res, 400, 'Enter a message of 1 to 5000 characters.');
     const conversation = await Conversation.findOne({ _id: message.conversation, isOfficialBroadcast: true, officialSender: req.user._id }).select('_id');
     if (!conversation) return fail(res, 404, 'Official message not found.');
     message.text = text;
@@ -309,6 +389,88 @@ const sendSupportReply = async (email, message) => {
   } catch {
     console.warn('[Support reply] Brevo could not be reached.');
     return { sent: false, reason: 'Brevo could not be reached. The ticket update was saved, but no reply email was sent.' };
+  }
+};
+
+const sendBulkEmail = async ({ apiKey, from, to, subject, text }) => {
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST', headers: { 'api-key': apiKey, 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ sender: { email: from, name: 'Vuprise' }, to: [{ email: to }], subject, textContent: text })
+    });
+    let body = {};
+    try { body = await response.json(); } catch { /* A provider error is classified below. */ }
+    if (!response.ok || typeof body.messageId !== 'string') return { sent: false, reason: 'The email provider did not accept this address.' };
+    return { sent: true, reason: '' };
+  } catch {
+    return { sent: false, reason: 'The email provider could not be reached.' };
+  }
+};
+
+// Email Users: sends one provider request per recipient so addresses are never
+// shared between recipients. "Send separately" paces delivery with a smaller
+// concurrency window; the default batches requests for speed while keeping
+// every message individually addressed. Recipients are always resolved from
+// the database (eligibility + optional verified-only), never from the client.
+const emailUsers = async (req, res, next) => {
+  try {
+    if (!consumeBroadcastRateLimit(`email:${req.user._id}`)) return fail(res, 429, 'Too many bulk emails were sent recently. Please try again later.');
+    const subject = typeof req.body?.subject === 'string' ? req.body.subject.trim() : '';
+    const text = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    const selectAll = req.body?.selectAll === true || String(req.body?.selectAll) === 'true';
+    const verifiedOnly = req.body?.verifiedOnly === true || String(req.body?.verifiedOnly) === 'true';
+    const sendSeparately = req.body?.sendSeparately === true || String(req.body?.sendSeparately) === 'true';
+    let recipientIds = req.body?.recipientIds;
+    if (typeof recipientIds === 'string') recipientIds = [recipientIds];
+    if (!subject || subject.length > 200) return fail(res, 400, 'Enter an email subject from 1 to 200 characters.');
+    if (!text || text.length > 10000) return fail(res, 400, 'Enter an email message from 1 to 10,000 characters.');
+    if (selectAll && Array.isArray(recipientIds) && recipientIds.length) return fail(res, 400, 'Choose all users or selected users, not both.');
+    if (!selectAll && (!Array.isArray(recipientIds) || recipientIds.length < 1 || recipientIds.length > 10000 || recipientIds.some((id) => !validId(id)))) {
+      return fail(res, 400, 'Select between 1 and 10,000 valid recipient accounts, or choose all users.');
+    }
+
+    const recipients = await User.find(selectAll
+      ? { _id: { $ne: req.user._id }, moderationStatus: { $ne: 'deleted' }, ...(verifiedOnly ? verifiedRecipientFilter() : {}) }
+      : { _id: { $in: [...new Set(recipientIds.map(String))], $ne: req.user._id }, moderationStatus: { $ne: 'deleted' }, ...(verifiedOnly ? verifiedRecipientFilter() : {}) }
+    ).select('_id email').lean();
+    if (!selectAll && recipients.length !== new Set(recipientIds.map(String).filter((id) => id !== String(req.user._id))).size) {
+      return fail(res, 404, verifiedOnly ? 'One or more selected accounts are missing or no longer verified. Refresh the user list and try again.' : 'One or more selected accounts no longer exist. Refresh the user list and try again.');
+    }
+    const seenAddresses = new Set();
+    const targets = [];
+    for (const user of recipients) {
+      const address = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
+      if (!EMAIL_ADDRESS_PATTERN.test(address) || seenAddresses.has(address)) continue;
+      seenAddresses.add(address);
+      targets.push({ email: address });
+    }
+    if (!targets.length) return fail(res, 400, 'There are no eligible recipients with a deliverable email address.');
+    if (targets.length > MAX_EMAIL_RECIPIENTS) return fail(res, 413, `This audience exceeds the current ${MAX_EMAIL_RECIPIENTS}-recipient email limit. Narrow the selection and try again.`);
+    const apiKey = process.env.BREVO_API_KEY;
+    if (!apiKey) return fail(res, 503, 'Brevo email delivery is not configured on the server.');
+    const from = process.env.PASSWORD_RESET_FROM || 'vupriseofficial@gmail.com';
+    if (!EMAIL_ADDRESS_PATTERN.test(from)) return fail(res, 503, 'The configured sender address is invalid.');
+
+    let sent = 0;
+    const failures = [];
+    const concurrency = sendSeparately ? 2 : 5;
+    for (let offset = 0; offset < targets.length; offset += concurrency) {
+      await Promise.all(targets.slice(offset, offset + concurrency).map(async ({ email }) => {
+        const result = await sendBulkEmail({ apiKey, from, to: email, subject, text });
+        if (result.sent) sent += 1;
+        else failures.push({ email, reason: result.reason });
+      }));
+    }
+    const skipped = recipients.length - targets.length;
+    await logAction(req, null, 'email_users', '', null, null, `${sent} sent, ${failures.length} failed${verifiedOnly ? ', verified only' : ''}`);
+    res.status(201).json({
+      success: true,
+      summary: { requested: targets.length, sent, failed: failures.length, skipped },
+      failures: failures.slice(0, 25),
+      message: `Email delivery finished: ${sent} of ${targets.length} accepted by the provider.`
+    });
+  } catch (error) {
+    next(error);
   }
 };
 
@@ -504,8 +666,18 @@ const updateInboxItem = async (req, res, next) => {
     item.resolvedAt = item.status === 'pending' || item.status === 'under_review' ? null : new Date();
     if (item.type.endsWith('_appeal') && item.status === 'approved') {
       if (!['lift_temporary_ban', 'lift_permanent_ban', 'reply_only'].includes(outcome)) return fail(res, 400, 'Select an explicit appeal outcome.');
+      // Older appeals (and appeals filed while signed out) can be stored
+      // without an account link. Resolve the account by the exact normalized
+      // email the appellant supplied, then persist the link for future reviews.
+      if (!item.user) {
+        const matchedAccount = await User.findOne({ email: item.email }).select('_id').lean();
+        if (matchedAccount) {
+          item.user = matchedAccount._id;
+          await logAction(req, matchedAccount, 'request_linked', '', null, item._id, `Linked appeal by email ${item.email}`);
+        }
+      }
       if (outcome.startsWith('lift_')) {
-        if (!item.user) return fail(res, 409, 'This appeal is not linked to a restorable account.');
+        if (!item.user) return fail(res, 409, `No account matches the appeal email ${item.email}. Verify the email with the requester, or choose "Reply only / no account change".`);
         const user = await User.findById(item.user).select('+moderationStatus +moderationExpiresAt +moderationReason');
         const expected = outcome === 'lift_temporary_ban' ? 'temporary_ban' : 'permanent_ban';
         if (!user || user.moderationStatus !== expected) return fail(res, 409, 'The linked account does not have the selected active ban.');
@@ -531,4 +703,4 @@ const updateInboxItem = async (req, res, next) => {
   } catch (error) { next(error); }
 };
 
-module.exports = { overview, listUsers, userDetail, userPosts, setVerification, broadcastMessage, listBroadcastMessages, updateBroadcastMessage, temporaryBan, permanentBan, liftBan, addWarning, removeWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply };
+module.exports = { overview, listUsers, userDetail, userPosts, setVerification, broadcastMessage, listBroadcastMessages, updateBroadcastMessage, temporaryBan, permanentBan, liftBan, addWarning, removeWarning, deleteUser, listRequests: listInbox(['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry']), listReports: listInbox('report'), listHelp: listInbox(['general_help', 'other']), updateInboxItem, sendSupportReply, emailUsers };

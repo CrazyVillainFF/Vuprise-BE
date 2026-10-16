@@ -33,16 +33,26 @@ const errorHandler = (err, req, res, next) => {
     statusCode = 413;
     message = req.originalUrl?.startsWith('/api/support/')
       ? 'Each evidence photo must be 5 MB or smaller.'
-      : 'The uploaded image is too large. Images are limited to 10MB; publish videos through the direct video upload flow.';
+      : req.originalUrl?.startsWith('/api/admin/messages/broadcast')
+        ? 'Official message images must be 5 MB or smaller.'
+        : 'The uploaded image is too large. Images are limited to 10MB; publish videos through the direct video upload flow.';
   }
   if (err.code === 'LIMIT_UNEXPECTED_FILE' || err.code === 'LIMIT_FILE_COUNT') {
     statusCode = 400;
     message = req.originalUrl?.startsWith('/api/support/')
       ? 'Attach up to 5 evidence photos.'
-      : 'Upload one image per post. Videos use the secure direct-upload flow.';
+      : req.originalUrl?.startsWith('/api/admin/messages/broadcast')
+        ? 'Attach one image per official message.'
+        : 'Upload one image per post. Videos use the secure direct-upload flow.';
   }
 
   console.error(`[Error ${statusCode}] ${req.method} ${req.originalUrl}:`, err.message);
+
+  // Unexpected server faults keep a generic message in production so internal
+  // details (database hosts, provider responses, stack context) are not exposed.
+  if (process.env.NODE_ENV === 'production' && statusCode >= 500) {
+    message = 'Something went wrong on the server. Please try again later.';
+  }
 
   res.status(statusCode).json({
     success: false,

@@ -20,6 +20,10 @@ services:
         value: 30d
       - key: CLIENT_URL
         value: https://nexora-lac-three.vercel.app
+      - key: ALLOWED_CLIENT_ORIGINS
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
       - key: PASSWORD_RESET_FROM
         value: vupriseofficial@gmail.com
       - key: BREVO_API_KEY
