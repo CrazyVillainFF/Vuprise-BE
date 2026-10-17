@@ -176,6 +176,8 @@ test('a chat message runs the classifier first, then a High-variant upstream ses
     assert.notEqual(chatSessionId, classifierSessionId, 'chat session differs from the ephemeral classifier session');
     assert.ok(calls.some((call) => call.url.endsWith('/session/ses_1') && call.method === 'DELETE'), 'classifier session is deleted');
     assert.ok(calls.some((call) => call.url.endsWith(`/session?directory=${encodeURIComponent(TEMP_WORKSPACE_DIR)}`)), 'sessions are pinned to the temp workspace');
+    assert.equal(TEMP_WORKSPACE_DIR, '/tmp', 'workspace defaults to a directory that exists on the OpenCode server itself');
+    assert.doesNotMatch(TEMP_WORKSPACE_DIR, /\\/, 'workspace has no Windows path separators');
   } finally {
     AiConversation.findOne = originalFindOne;
     restore();

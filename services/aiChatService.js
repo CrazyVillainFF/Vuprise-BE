@@ -5,19 +5,24 @@
 // against the running server (GET /doc): POST /session, POST
 // /session/:id/message, DELETE /session/:id, GET /global/health.
 
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
-
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4096';
 const DEFAULT_PROVIDER_ID = 'opencode';
 const DEFAULT_MODEL_ID = 'deepseek-v4.1-flash-free';
 const DEFAULT_TIMEOUT_MS = 90000;
 const DEFAULT_SERVER_USERNAME = 'opencode';
+const DEFAULT_WORKSPACE_DIR = '/tmp';
 
-// Sessions run in an empty temp directory outside the project so project
-// files, CLAUDE.md, or repo content can never enter the model context.
-const TEMP_WORKSPACE_DIR = path.join(os.tmpdir(), 'vuprise-ai-chat');
+// Sessions are pinned to a workspace directory passed to POST /session. That
+// path is interpreted by the OPENCODE SERVER, not by this process, so it must
+// already exist on the server's filesystem: a missing directory makes the
+// server answer 500 for every message (verified live). A backend-side
+// os.tmpdir() path is wrong whenever the server runs on another machine, which
+// is exactly the production layout, so the default is the POSIX /tmp that
+// always exists there. Override with OPENCODE_WORKSPACE_DIR for servers where
+// /tmp is not appropriate (for example a Windows-hosted server). Keeping
+// sessions out of the project directory prevents project files, CLAUDE.md, or
+// repo content from ever entering the model context.
+const TEMP_WORKSPACE_DIR = (process.env.OPENCODE_WORKSPACE_DIR || DEFAULT_WORKSPACE_DIR).replace(/\/+$/, '') || DEFAULT_WORKSPACE_DIR;
 
 // Public identity: the assistant must only ever present itself as Vuprise AI.
 const SYSTEM_PROMPT = 'You are Vuprise AI, the built-in assistant of Vuprise, a professional networking platform. Help users with networking, profile and post drafts, career advice, and general questions. Your name is Vuprise AI. If asked your name, who made you, or what model you are, say only: \'I\'m Vuprise AI, the assistant built into Vuprise.\' Never mention DeepSeek, OpenCode, FlagshipRouter, Claude, any model or provider name, any codebase, repo, file, CLAUDE.md, or tool. You are not a coding agent and have no access to any repository or files. Keep answers concise and friendly.';
@@ -240,10 +245,10 @@ const isAvailable = async () => {
 
 const createSession = async (title = 'Vuprise AI chat', signal) => {
   const { modelId, providerId, variant, timeoutMs } = config();
-  fs.mkdirSync(TEMP_WORKSPACE_DIR, { recursive: true });
   // POST /session expects { model: { id, providerID } } (variant optional,
   // verified live) and accepts a ?directory= query param that pins the session
-  // workspace outside the project (both verified in the spec and live).
+  // workspace; the directory has to exist on the OpenCode server itself (see
+  // TEMP_WORKSPACE_DIR above - a missing directory makes every message 500).
   const session = await requestJson('POST', `/session?directory=${encodeURIComponent(TEMP_WORKSPACE_DIR)}`, {
     title,
     model: { id: modelId, providerID: providerId, variant }
