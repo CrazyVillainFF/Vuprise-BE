@@ -130,6 +130,65 @@ const fetchWithTimeout = async (url, options, timeoutMs, externalSignal) => {
   }
 };
 
+// A failing upstream call must be diagnosable from the server log alone
+// without leaking anything to clients. The query string is dropped (it can
+// carry the temp workspace path) and session ids are collapsed.
+const safeUpstreamPath = (path) => String(path).replace(/\?.*$/, '').replace(/\/ses_[A-Za-z0-9]+/g, '/:session');
+
+// Extracts a single sanitized line from an upstream error body such as
+// {"name":"UnknownError","data":{"message":"...","ref":"err_..."}}. The text is
+// collapsed, truncated, and the configured server password (if any ever
+// appears) is redacted before it can reach a log line.
+const upstreamErrorDetail = async (response) => {
+  try {
+    if (typeof response.text !== 'function') return '';
+    const text = await response.text();
+    if (!text) return '';
+    let message = '';
+    try {
+      const parsed = JSON.parse(text);
+      const raw = parsed?.data?.message || parsed?.error?.message || parsed?.message || parsed?.name;
+      message = typeof raw === 'string' ? raw : '';
+    } catch {
+      message = text;
+    }
+    const { password } = config();
+    let detail = message.replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (password) detail = detail.split(password).join('[redacted]');
+    return detail;
+  } catch {
+    return '';
+  }
+};
+
+// Throttled self-diagnosis for upstream 5xx responses. An unknown model or
+// provider id makes the OpenCode server answer 500 for every message while
+// GET /global/health still succeeds, which otherwise hides a typo in
+// OPENCODE_MODEL_ID/OPENCODE_MODEL_PROVIDER behind a generic upstream error.
+// One GET /provider names the offered ids in the log; client responses are
+// unchanged and provider details are never forwarded to the browser.
+let lastModelCheckAt = 0;
+const MODEL_CHECK_THROTTLE_MS = 120000;
+const logProviderModelMismatch = async () => {
+  const now = Date.now();
+  if (now - lastModelCheckAt < MODEL_CHECK_THROTTLE_MS) return;
+  lastModelCheckAt = now;
+  const { baseUrl, providerId, modelId } = config();
+  const response = await fetchWithTimeout(`${baseUrl}/provider`, { method: 'GET', headers: upstreamHeaders() }, 5000);
+  if (!response.ok) return;
+  const payload = await response.json().catch(() => null);
+  const providers = Array.isArray(payload?.all) ? payload.all : null;
+  if (!providers) return;
+  const provider = providers.find((entry) => entry?.id === providerId);
+  if (provider && provider.models && Object.keys(provider.models).includes(modelId)) return;
+  if (provider) {
+    const offered = Object.keys(provider.models || {}).slice(0, 8).join(', ');
+    console.warn(`[ai-chat] configured model "${modelId}" is not offered by provider "${providerId}" on the OpenCode server (offered: ${offered || 'none'}). Fix OPENCODE_MODEL_ID in the server environment (see docs/production-feature-setup.md).`);
+  } else {
+    console.warn(`[ai-chat] configured provider "${providerId}" was not found on the OpenCode server. Fix OPENCODE_MODEL_PROVIDER/OPENCODE_MODEL_ID in the server environment (see docs/production-feature-setup.md).`);
+  }
+};
+
 const requestJson = async (method, path, body, timeoutMs, signal) => {
   const { baseUrl } = config();
   let response;
@@ -149,6 +208,16 @@ const requestJson = async (method, path, body, timeoutMs, signal) => {
     throw error;
   }
   if (!response.ok) {
+    // An HTTP-level failure (as opposed to an unreachable provider) needs its
+    // own sanitized log line: this is how a rejected model id, a failed auth,
+    // or a provider outage becomes distinguishable after the fact.
+    try {
+      const detail = await upstreamErrorDetail(response);
+      console.warn(`[ai-chat] upstream failure method=${method} path=${safeUpstreamPath(path)} status=${response.status}${detail ? ` detail="${detail}"` : ''}`);
+      if (response.status >= 500) await logProviderModelMismatch();
+    } catch {
+      // Diagnostics must never replace the real error.
+    }
     throw new AiChatError(
       'The AI service could not complete this request. Please try again.',
       response.status >= 500 ? 503 : 502,
@@ -465,6 +534,7 @@ const generateImage = async (prompt, signal) => {
 const resetStateForTests = () => {
   inFlight.clear();
   toolsSupportedByProvider = true;
+  lastModelCheckAt = 0;
 };
 
 module.exports = { chat, oneShot, acquireUserLock, releaseUserLock, createSession, deleteSession, isAvailable, isImageGenerationAvailable, imageGenerationConfig, validateImageConfig, classifyImageProviderError, parseImageResponse, sniffImageMime, mimeForImageUrl, generateImage, config, describeAiProvider, AiChatError, resetStateForTests, SYSTEM_PROMPT, TEMP_WORKSPACE_DIR };

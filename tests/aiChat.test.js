@@ -633,6 +633,89 @@ test('an unreachable OpenCode server fails with the retryable 503 and logs a san
   limiter.restore();
 });
 
+test('an upstream 5xx logs the provider detail and names a mismatched configured model', async () => {
+  resetStateForTests();
+  const limiter = installLimiter();
+  await withAiEnv({ OPENCODE_BASE_URL: 'http://10.0.0.7:4096', OPENCODE_MODEL_ID: 'not-an-offered-model' }, async () => {
+    const conversation = conversationDoc();
+    const originalFindOne = AiConversation.findOne;
+    AiConversation.findOne = () => ({ select: async () => conversation });
+    const unknownError = () => ({
+      ok: false,
+      status: 500,
+      text: async () => JSON.stringify({ name: 'UnknownError', data: { message: 'Unexpected server error. Check server logs for details.', ref: 'err_test' } }),
+      json: async () => ({})
+    });
+    const calls = [];
+    const restore = withMockFetch(async (url, options) => {
+      calls.push({ url, method: options?.method });
+      if (isSessionCreate(url)) return jsonResponse(200, { id: 'ses_1' });
+      if (options?.method === 'DELETE') return jsonResponse(200, {});
+      if (String(url).endsWith('/provider')) return jsonResponse(200, { all: [{ id: 'opencode', models: { 'offered-model-id': {} } }] });
+      if (isClassifierCall(options)) return unknownError();
+      return unknownError();
+    });
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      const res = response();
+      await sendConversationMessage({ user: user('member-badmodel'), params: { id: 'aic_1' }, body: { message: 'Hi there' }, get: () => 'localhost' }, res, (error) => { throw error; });
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.body.code, 'AI_UPSTREAM_ERROR');
+      assert.equal(res.body.message, 'The AI service could not complete this request. Please try again.');
+      assert.equal(conversation.saved, false, 'a failed provider call persists nothing');
+      const log = warnings.join('\n');
+      assert.match(log, /\[ai-chat\] upstream failure method=POST path=\/session\/:session\/message status=500/);
+      assert.match(log, /detail="Unexpected server error\. Check server logs for details\."/);
+      assert.match(log, /configured model "not-an-offered-model" is not offered by provider "opencode"/);
+      assert.match(log, /offered: offered-model-id/, 'the log names the ids the server does offer');
+      assert.match(log, /OPENCODE_MODEL_ID/, 'the log names the variable to fix');
+      assert.equal(calls.filter((call) => String(call.url).endsWith('/provider')).length, 1, 'the model list is checked once per throttle window');
+      assert.equal(res.body.message.includes('Unexpected server error'), false, 'provider internals never reach the client');
+    } finally {
+      console.warn = originalWarn;
+      AiConversation.findOne = originalFindOne;
+      restore();
+    }
+  });
+  limiter.restore();
+});
+
+test('an upstream auth rejection logs the status without probing the model list', async () => {
+  resetStateForTests();
+  const limiter = installLimiter();
+  await withAiEnv({ OPENCODE_BASE_URL: 'http://10.0.0.7:4096' }, async () => {
+    const conversation = conversationDoc();
+    const originalFindOne = AiConversation.findOne;
+    AiConversation.findOne = () => ({ select: async () => conversation });
+    const calls = [];
+    const restore = withMockFetch(async (url, options) => {
+      calls.push({ url, method: options?.method });
+      if (options?.method === 'DELETE') return jsonResponse(200, {});
+      return { ok: false, status: 401, text: async () => 'Unauthorized', json: async () => ({}) };
+    });
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      const res = response();
+      await sendConversationMessage({ user: user('member-401'), params: { id: 'aic_1' }, body: { message: 'Hi there' }, get: () => 'localhost' }, res, (error) => { throw error; });
+      assert.equal(res.statusCode, 502);
+      assert.equal(res.body.code, 'AI_UPSTREAM_ERROR');
+      const log = warnings.join('\n');
+      assert.match(log, /\[ai-chat\] upstream failure method=POST path=\/session status=401 detail="Unauthorized"/);
+      assert.equal(calls.some((call) => String(call.url).endsWith('/provider')), false, 'no model probe for non-5xx failures');
+      assert.equal(res.body.message.includes('Unauthorized'), false, 'provider internals never reach the client');
+    } finally {
+      console.warn = originalWarn;
+      AiConversation.findOne = originalFindOne;
+      restore();
+    }
+  });
+  limiter.restore();
+});
+
 test('HTTP basic credentials from the environment are attached to every upstream request and never echoed', async () => {
   resetStateForTests();
   const limiter = installLimiter();
