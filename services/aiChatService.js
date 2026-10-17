@@ -22,16 +22,12 @@ const TEMP_WORKSPACE_DIR = path.join(os.tmpdir(), 'vuprise-ai-chat');
 // Public identity: the assistant must only ever present itself as Vuprise AI.
 const SYSTEM_PROMPT = 'You are Vuprise AI, the built-in assistant of Vuprise, a professional networking platform. Help users with networking, profile and post drafts, career advice, and general questions. Your name is Vuprise AI. If asked your name, who made you, or what model you are, say only: \'I\'m Vuprise AI, the assistant built into Vuprise.\' Never mention DeepSeek, OpenCode, FlagshipRouter, Claude, any model or provider name, any codebase, repo, file, CLAUDE.md, or tool. You are not a coding agent and have no access to any repository or files. Keep answers concise and friendly.';
 
-// Tool ids verified live via GET /experimental/tool/ids on the OpenCode server.
-// Sending them all as false disables every tool for the request. Some providers
-// (e.g. the OpenCode free tier) reject any request that carries tool
-// definitions, so this is attempted once and then skipped for the process.
-const OPENCODE_TOOL_IDS = [
-  'invalid', 'question', 'bash', 'read', 'glob', 'grep', 'edit', 'write',
-  'task', 'webfetch', 'todowrite', 'websearch', 'skill', 'apply_patch'
-];
-const ALL_TOOLS_DISABLED = Object.fromEntries(OPENCODE_TOOL_IDS.map((id) => [id, false]));
-let toolsSupportedByProvider = true;
+// Requests never carry tool definitions. An all-false tools map was tried
+// first in earlier revisions, but the free tier rejects any request that
+// includes tools (403 FreeTierError), so that attempt only bought a guaranteed
+// rejection plus a duplicate call on every fresh process. With no tools defined
+// the model cannot invoke any (verified live: plain requests answer with text
+// only), which is exactly what a chat assistant wants.
 
 class AiChatError extends Error {
   constructor(message, statusCode = 502, code = 'AI_UPSTREAM_ERROR', upstreamStatus = null, upstreamCause = null) {
@@ -265,7 +261,7 @@ const deleteSession = async (sessionId) => {
   }
 };
 
-const sendMessage = (sessionId, message, { disableTools = false, system, variant: variantOverride, fileParts = [], signal } = {}) => {
+const sendMessage = (sessionId, message, { system, variant: variantOverride, fileParts = [], signal } = {}) => {
   const { providerId, modelId, variant, timeoutMs } = config();
   const body = {
     model: { providerID: providerId, modelID: modelId },
@@ -273,7 +269,6 @@ const sendMessage = (sessionId, message, { disableTools = false, system, variant
     system: system || SYSTEM_PROMPT,
     parts: [{ type: 'text', text: message }, ...fileParts]
   };
-  if (disableTools) body.tools = ALL_TOOLS_DISABLED;
   return requestJson('POST', `/session/${sessionId}/message`, body, timeoutMs, signal);
 };
 
@@ -284,25 +279,11 @@ const oneShot = async (message, { system, variant, signal } = {}) => {
   let sessionId = null;
   try {
     sessionId = await createSession('Vuprise AI helper', signal);
-    const sentWithTools = toolsSupportedByProvider;
-    let payload = await sendMessage(sessionId, message, { disableTools: sentWithTools, system, variant, signal });
-    if (sentWithTools && isFreeTierRejection(payload)) {
-      toolsSupportedByProvider = false;
-      await deleteSession(sessionId);
-      sessionId = await createSession('Vuprise AI helper', signal);
-      payload = await sendMessage(sessionId, message, { system, variant, signal });
-    }
+    const payload = await sendMessage(sessionId, message, { system, variant, signal });
     return extractReply(payload);
   } finally {
     await deleteSession(sessionId);
   }
-};
-
-const isFreeTierRejection = (payload) => {
-  const error = payload?.info?.error;
-  return error?.data?.statusCode === 403
-    && typeof error?.data?.message === 'string'
-    && /free tier/i.test(error.data.message);
 };
 
 const extractReply = (payload) => {
@@ -319,9 +300,9 @@ const extractReply = (payload) => {
 };
 
 // Runs one exchange in the given upstream session. Self-heals forgotten
-// sessions (404) and free-tier tool rejections by opening a fresh session, and
-// returns the session id actually used so the caller can persist it. Attached
-// images travel as documented FilePartInput entries ({ type, mime, url }).
+// sessions (404) by opening a fresh session, and returns the session id
+// actually used so the caller can persist it. Attached images travel as
+// documented FilePartInput entries ({ type, mime, url }).
 const chat = async (userId, sessionId, message, { imageUrls = [], signal } = {}) => {
   const key = String(userId);
   if (inFlight.has(key)) {
@@ -337,25 +318,16 @@ const chat = async (userId, sessionId, message, { imageUrls = [], signal } = {})
     let activeSessionId = sessionId;
     if (!activeSessionId) activeSessionId = await createSession('Vuprise AI chat', signal);
     let payload;
-    let sentWithTools = false;
     try {
-      sentWithTools = toolsSupportedByProvider;
-      payload = await sendMessage(activeSessionId, message, { disableTools: sentWithTools, fileParts, signal });
+      payload = await sendMessage(activeSessionId, message, { fileParts, signal });
     } catch (error) {
       if (error instanceof AiChatError && error.upstreamStatus === 404) {
         await deleteSession(activeSessionId);
         activeSessionId = await createSession('Vuprise AI chat', signal);
-        sentWithTools = toolsSupportedByProvider;
-        payload = await sendMessage(activeSessionId, message, { disableTools: sentWithTools, fileParts, signal });
+        payload = await sendMessage(activeSessionId, message, { fileParts, signal });
       } else {
         throw error;
       }
-    }
-    if (sentWithTools && isFreeTierRejection(payload)) {
-      toolsSupportedByProvider = false;
-      await deleteSession(activeSessionId);
-      activeSessionId = await createSession('Vuprise AI chat', signal);
-      payload = await sendMessage(activeSessionId, message, { fileParts, signal });
     }
     return { reply: extractReply(payload), sessionId: activeSessionId };
   } finally {
@@ -533,7 +505,6 @@ const generateImage = async (prompt, signal) => {
 // Test-only helper so suites can start from a clean state.
 const resetStateForTests = () => {
   inFlight.clear();
-  toolsSupportedByProvider = true;
   lastModelCheckAt = 0;
 };
 

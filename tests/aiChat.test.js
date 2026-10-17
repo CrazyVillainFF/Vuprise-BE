@@ -111,12 +111,6 @@ let quota = null;
 test.beforeEach(() => { quota = installImageQuota(); });
 test.afterEach(() => { quota.restore(); });
 
-const ALL_TOOLS_DISABLED = {
-  invalid: false, question: false, bash: false, read: false, glob: false, grep: false,
-  edit: false, write: false, task: false, webfetch: false, todowrite: false,
-  websearch: false, skill: false, apply_patch: false
-};
-
 const conversationDoc = (overrides = {}) => ({
   _id: 'aic_1',
   title: 'New chat',
@@ -169,11 +163,12 @@ test('a chat message runs the classifier first, then a High-variant upstream ses
     assert.ok(classifierCall, 'classifier call was made');
     assert.equal(classifierCall.body.variant, 'low');
     assert.match(classifierCall.body.parts[0].text, /Hi there/);
+    assert.equal(classifierCall.body.tools, undefined, 'no tool definitions are sent');
 
     const chatCall = calls.filter((call) => call.body?.system === SYSTEM_PROMPT).pop();
     assert.ok(chatCall, 'chat call was made');
     assert.equal(chatCall.body.variant, 'high');
-    assert.deepEqual(chatCall.body.tools, ALL_TOOLS_DISABLED);
+    assert.equal(chatCall.body.tools, undefined, 'no tool definitions are sent');
 
     const chatSessionId = conversation.opencodeSessionId;
     assert.match(chatSessionId, /^ses_/);
