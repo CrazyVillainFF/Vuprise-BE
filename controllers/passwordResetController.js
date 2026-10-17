@@ -2,6 +2,7 @@ const User = require('../models/User');
 const PasswordResetState = require('../models/PasswordResetState');
 const PasswordResetCounter = require('../models/PasswordResetCounter');
 const { createResetCode, hashResetToken } = require('../utils/passwordResetSecurity');
+const { getBrevoConfig } = require('../services/brevoEmail');
 
 const genericRequestMessage = 'If an account matches this email, a password reset code will be sent.';
 const WINDOW_MS = 30 * 60 * 1000;
@@ -38,14 +39,13 @@ const releaseCounter = async (key, windowStartedAt) => {
 };
 
 const getMailConfiguration = () => {
-  const apiKey = process.env.BREVO_API_KEY;
-  const from = process.env.PASSWORD_RESET_FROM || 'vupriseofficial@gmail.com';
+  const { apiKey, senderEmail, senderName } = getBrevoConfig();
   if (!apiKey) return { error: 'Brevo email delivery is not configured on the server.' };
-  if (!/^(?:[^<>\r\n]+\s<)?[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+(?:>)?$/.test(from)) {
+  if (!/^(?:[^<>\r\n]+\s<)?[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+(?:>)?$/.test(senderEmail)) {
     return { error: 'The configured password-reset sender address is invalid.' };
   }
 
-  return { apiKey, from };
+  return { apiKey, from: senderEmail, senderName };
 };
 
 const classifyBrevoError = (providerError) => {
@@ -59,7 +59,7 @@ const classifyBrevoError = (providerError) => {
   if (/sender|\bfrom\b|domain.*verif|verif.*domain/.test(detail)) {
     return {
       category: 'sender_rejected',
-      message: 'Brevo rejected the configured sender. Check PASSWORD_RESET_FROM and verify that sender in Brevo. No email was sent.'
+      message: 'Brevo rejected the configured sender. Check BREVO_SENDER_EMAIL (or the PASSWORD_RESET_FROM fallback) and verify that sender in Brevo. No email was sent.'
     };
   }
   return {
@@ -73,7 +73,7 @@ const sendResetEmail = async (to, resetCode, mailConfig) => {
     method: 'POST',
     headers: { 'api-key': mailConfig.apiKey, 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({
-      sender: { email: mailConfig.from, name: 'Vuprise' },
+      sender: { email: mailConfig.from, name: mailConfig.senderName },
       to: [{ email: to }],
       subject: 'Reset your Vuprise password',
       textContent: `Your Vuprise password reset code is ${resetCode}. It expires in 10 minutes and can only be used once.\n\nIf you did not request this, ignore this message.`,

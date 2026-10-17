@@ -21,6 +21,8 @@ const realtimeRoutes = require('./routes/realtimeRoutes');
 const { cleanupAbandonedVideoUploads } = require('./controllers/videoUploadController');
 const adminRoutes = require('./routes/adminRoutes');
 const supportRoutes = require('./routes/supportRoutes');
+const aiRoutes = require('./routes/aiRoutes');
+const { isImageGenerationAvailable } = require('./services/aiChatService');
 
 const app = express();
 
@@ -263,6 +265,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/support', supportRoutes);
+app.use('/api/ai', aiRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/posts', postRoutes);
 // Comments are nested under posts for create/list operations (the client calls
@@ -285,6 +288,9 @@ const server = app.listen(PORT, () => {
   console.log(`\n======================================================`);
   console.log(`🚀 VUPRISE Server running on port http://localhost:${PORT}`);
   console.log(`📦 Environment: ${process.env.NODE_ENV || 'development'}`);
+  if (!isImageGenerationAvailable()) {
+    console.warn('[ai] Image generation is disabled: set AI_IMAGE_API_URL and AI_IMAGE_API_KEY in server/.env to enable it (see .env.example).');
+  }
   console.log(`======================================================\n`);
 });
 

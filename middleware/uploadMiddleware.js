@@ -103,6 +103,37 @@ const supportUpload = multer({
   fileFilter
 });
 
+// Vuprise AI attachments: JPG/PNG/WEBP only, 5MB each, up to 4 per message.
+const aiUpload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024, files: 4 },
+  fileFilter: (req, file, cb) => {
+    const imageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    if (imageTypes.includes(file.mimetype)) return cb(null, true);
+    const error = new Error('Attachments must be JPG, PNG, or WebP images.');
+    error.statusCode = 415;
+    return cb(error);
+  }
+});
+
+const validateAiImageContent = imageContentValidator({
+  allowed: ['jpeg', 'png', 'webp'],
+  message: 'Attachments must be valid JPG, PNG, or WebP images (up to 5MB each, 4 per message).'
+});
+
+// Multer errors (size, count, field) become clean 400/413 responses instead of
+// reaching the generic error middleware.
+const aiAttachmentUpload = (req, res, next) => {
+  aiUpload.array('images', 4)(req, res, (error) => {
+    if (!error) return next();
+    const files = [...(req.files || [])];
+    files.forEach((file) => fs.unlink(file.path, () => {}));
+    if (error.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ success: false, message: 'Each attachment must be 5MB or smaller.' });
+    if (error.code === 'LIMIT_FILE_COUNT' || error.code === 'LIMIT_UNEXPECTED_FILE') return res.status(400).json({ success: false, message: 'Attach up to 4 images per message.' });
+    return res.status(error.statusCode || 400).json({ success: false, message: error.message || 'The attachment could not be uploaded.' });
+  });
+};
+
 const postUpload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024, files: 1 },
@@ -198,4 +229,4 @@ const deleteUploadedMedia = async ({ publicId, url, resourceType = 'image' } = {
   }
 };
 
-module.exports = { upload, supportUpload, postUpload, broadcastUpload, preparePostUpload, processUploadedFile, processUploadedMedia, deleteUploadedMedia, detectImageType, validateImageContent, validateBroadcastImage, discardUploadedFile };
+module.exports = { upload, supportUpload, postUpload, broadcastUpload, preparePostUpload, processUploadedFile, processUploadedMedia, deleteUploadedMedia, detectImageType, validateImageContent, validateBroadcastImage, discardUploadedFile, aiAttachmentUpload, validateAiImageContent };

@@ -72,8 +72,13 @@ exports.watchPresence = async (req, res, next) => {
 
 exports.logout = async (req, res, next) => {
   try {
-  const session = hub.getSession(req.body.sessionId);
-  if (!session || session.userId !== String(req.user._id)) return fail(res, 404, 'Realtime session not found.');
+  const session = req.body?.sessionId ? hub.getSession(req.body.sessionId) : null;
+  // Ending a realtime session is deliberately idempotent: the session may
+  // already be gone because its SSE stream closed, its heartbeat TTL expired,
+  // or the client retried the cleanup call. A session owned by another account
+  // is never touched, and success is still returned for it so session IDs
+  // cannot be probed.
+  if (!session || session.userId !== String(req.user._id)) return res.json({ success: true });
   if (hub.removeSession(session) && hub.getSessionCount(session.userId) === 0) {
     const lastSeenAt = new Date();
     await User.updateOne({ _id: session.userId }, { $set: { lastSeenAt }, $unset: { inactivityReminderClaimedAt: 1 } });

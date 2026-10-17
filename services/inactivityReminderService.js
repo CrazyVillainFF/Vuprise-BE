@@ -1,9 +1,9 @@
 const User = require('../models/User');
+const { getBrevoConfig, escapeHtml } = require('./brevoEmail');
 
 const INACTIVITY_MS = 28 * 60 * 60 * 1000;
 const CLAIM_LEASE_MS = 30 * 60 * 1000;
 const BATCH_LIMIT = 100;
-const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 
 function isInactive(lastSeenAt, now = Date.now()) {
   if (lastSeenAt === null || lastSeenAt === undefined || lastSeenAt === '') return false;
@@ -22,16 +22,15 @@ function createReminderEmail(user, websiteUrl) {
 }
 
 async function sendViaBrevo(user, { fetchImpl = global.fetch, env = process.env } = {}) {
-  const apiKey = env.BREVO_API_KEY;
-  const from = env.PASSWORD_RESET_FROM || 'vupriseofficial@gmail.com';
+  const { apiKey, senderEmail, senderName } = getBrevoConfig(env);
   const websiteUrl = env.CLIENT_URL || 'https://nexora-lac-three.vercel.app';
   if (!apiKey) throw new Error('Brevo email delivery is not configured.');
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(from)) throw new Error('The configured Vuprise sender address is invalid.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(senderEmail)) throw new Error('The configured Vuprise sender address is invalid.');
   const email = createReminderEmail(user, websiteUrl);
   const response = await fetchImpl('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
     headers: { 'api-key': apiKey, 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ sender: { email: from, name: 'Vuprise' }, to: [{ email: user.email }], subject: email.subject, textContent: email.text, htmlContent: email.html })
+    body: JSON.stringify({ sender: { email: senderEmail, name: senderName }, to: [{ email: user.email }], subject: email.subject, textContent: email.text, htmlContent: email.html })
   });
   let body = {};
   try { body = await response.json(); } catch { /* A missing response body is treated as a provider failure. */ }

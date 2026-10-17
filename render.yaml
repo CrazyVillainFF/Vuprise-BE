@@ -26,6 +26,10 @@ services:
         sync: false
       - key: PASSWORD_RESET_FROM
         value: vupriseofficial@gmail.com
+      - key: BREVO_SENDER_EMAIL
+        value: vupriseofficial@gmail.com
+      - key: BREVO_SENDER_NAME
+        value: Vuprise
       - key: BREVO_API_KEY
         sync: false
       - key: CLOUDINARY_CLOUD_NAME
@@ -50,5 +54,9 @@ services:
         sync: false
       - key: PASSWORD_RESET_FROM
         value: vupriseofficial@gmail.com
+      - key: BREVO_SENDER_EMAIL
+        value: vupriseofficial@gmail.com
+      - key: BREVO_SENDER_NAME
+        value: Vuprise
       - key: CLIENT_URL
         value: https://nexora-lac-three.vercel.app

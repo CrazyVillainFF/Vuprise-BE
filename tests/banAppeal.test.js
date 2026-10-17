@@ -87,3 +87,96 @@ test('a repeated identical appeal within the window is acknowledged without a se
     limiter.restore();
   }
 });
+
+test('the reported repro appeal is accepted while signed out and persisted for review', async () => {
+  const limiter = installRateLimitCounter({ windowMs: 60 * 60 * 1000, max: 5 });
+  const originalFindOne = User.findOne;
+  const originalExists = SupportRequest.exists;
+  const originalCreate = SupportRequest.create;
+  let created = null;
+  User.findOne = () => ({ select: () => ({ lean: async () => null }) });
+  SupportRequest.exists = async () => null;
+  SupportRequest.create = async (payload) => { created = payload; return { _id: 'request-repro' }; };
+  try {
+    const res = response();
+    await createRequest({
+      body: {
+        type: 'temporary_ban_appeal',
+        email: 'appeal@example.com',
+        subject: 'Account got ban',
+        message: 'Hello, My Account was temporarily banned but no reason please unban'
+      },
+      ip: 'test-appeal-repro',
+      files: []
+    }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 201);
+    assert.equal(created.type, 'temporary_ban_appeal');
+    assert.equal(created.subject, 'Account got ban');
+    assert.equal(created.status, 'pending');
+    assert.equal(created.user, null);
+  } finally {
+    User.findOne = originalFindOne;
+    SupportRequest.exists = originalExists;
+    SupportRequest.create = originalCreate;
+    limiter.restore();
+  }
+});
+
+test('a free-text account user ID such as a name is accepted and never used as identity proof', async () => {
+  const limiter = installRateLimitCounter({ windowMs: 60 * 60 * 1000, max: 5 });
+  const originalFindOne = User.findOne;
+  const originalFindById = User.findById;
+  const originalExists = SupportRequest.exists;
+  const originalCreate = SupportRequest.create;
+  let created = null;
+  let findByIdCalls = 0;
+  User.findById = () => { findByIdCalls += 1; return { select: async () => null }; };
+  User.findOne = () => ({ select: () => ({ lean: async () => null }) });
+  SupportRequest.exists = async () => null;
+  SupportRequest.create = async (payload) => { created = payload; return { _id: 'request-name' }; };
+  try {
+    const res = response();
+    await createRequest({ body: appealBody({ userId: 'Archana' }), ip: 'test-appeal-name', files: [] }, res, (error) => { throw error; });
+    assert.equal(res.statusCode, 201);
+    assert.equal(created.user, null);
+    assert.equal(findByIdCalls, 0);
+  } finally {
+    User.findOne = originalFindOne;
+    User.findById = originalFindById;
+    SupportRequest.exists = originalExists;
+    SupportRequest.create = originalCreate;
+    limiter.restore();
+  }
+});
+
+test('validation failures return field-specific messages instead of one generic error', async () => {
+  const limiter = installRateLimitCounter({ windowMs: 60 * 60 * 1000, max: 5 });
+  try {
+    const badType = response();
+    await createRequest({ body: appealBody({ type: 'temporary ban appeal' }), ip: 'test-appeal-v1', files: [] }, badType, (error) => { throw error; });
+    assert.equal(badType.statusCode, 400);
+    assert.equal(badType.body.message, 'Request type: please select a valid option.');
+
+    const shortSubject = response();
+    await createRequest({ body: appealBody({ subject: 'ab' }), ip: 'test-appeal-v2', files: [] }, shortSubject, (error) => { throw error; });
+    assert.equal(shortSubject.statusCode, 400);
+    assert.equal(shortSubject.body.message, 'Subject: enter at least 3 characters.');
+
+    const shortMessage = response();
+    await createRequest({ body: appealBody({ message: 'too short' }), ip: 'test-appeal-v3', files: [] }, shortMessage, (error) => { throw error; });
+    assert.equal(shortMessage.statusCode, 400);
+    assert.equal(shortMessage.body.message, 'Message: enter at least 10 characters.');
+
+    const badEmail = response();
+    await createRequest({ body: appealBody({ email: 'not-an-email' }), ip: 'test-appeal-v4', files: [] }, badEmail, (error) => { throw error; });
+    assert.equal(badEmail.statusCode, 400);
+    assert.equal(badEmail.body.message, 'Email: enter a valid email address.');
+
+    const longUserId = response();
+    await createRequest({ body: appealBody({ userId: 'x'.repeat(121) }), ip: 'test-appeal-v5', files: [] }, longUserId, (error) => { throw error; });
+    assert.equal(longUserId.statusCode, 400);
+    assert.equal(longUserId.body.message, 'Account user ID: keep it under 120 characters.');
+  } finally {
+    limiter.restore();
+  }
+});

@@ -583,6 +583,7 @@ test('support replies accurately report Brevo acceptance and rejection without l
     global.fetch = async () => ({ ok: false, json: async () => ({ message: 'recipient private details' }) });
     const rejected = await sendSupportReply('user@example.com', 'Please review the app.');
     assert.equal(rejected.sent, false);
+    assert.match(rejected.reason, /Brevo rejected this recipient address/);
     assert.doesNotMatch(rejected.reason, /recipient private details/);
   } finally {
     global.fetch = originalFetch;

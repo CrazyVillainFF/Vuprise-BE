@@ -14,6 +14,7 @@ const AdminAuditLog = require('../models/AdminAuditLog');
 const AdminBroadcast = require('../models/AdminBroadcast');
 const { deleteUploadedMedia, discardUploadedFile, processUploadedMedia } = require('../middleware/uploadMiddleware');
 const { isVerifiedAccount, VERIFIED_EMAIL } = require('../utils/verifiedAccount');
+const { getBrevoConfig, sendBrevoEmail, textToHtml, EMAIL_ADDRESS_PATTERN } = require('../services/brevoEmail');
 
 const fail = (res, status, message) => res.status(status).json({ success: false, message });
 const validId = (id) => mongoose.Types.ObjectId.isValid(id);
@@ -26,7 +27,6 @@ const verifiedRecipientFilter = () => ({ $or: [{ isVerifiedAccount: true }, { em
 // Bulk email is sent with one provider request per recipient (privacy), so the
 // synchronous budget stays far below the in-app official-message limit.
 const MAX_EMAIL_RECIPIENTS = 200;
-const EMAIL_ADDRESS_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Official message sends are expensive (up to 10,000 recipients each), so keep
 // a per-administrator submit budget on top of the route-level authorization.
@@ -370,41 +370,11 @@ const findTarget = async (req, res) => {
 const logAction = (req, user, action, reason, expiresAt = null, caseId = null, outcome = '') => AdminAuditLog.create({ targetUser: user?._id || null, admin: req.user._id, action, reason, expiresAt, caseId, outcome });
 
 const sendSupportReply = async (email, message) => {
-  const apiKey = process.env.BREVO_API_KEY;
-  const from = process.env.PASSWORD_RESET_FROM || 'vupriseofficial@gmail.com';
-  if (!apiKey) return { sent: false, reason: 'Brevo email delivery is not configured on the server.' };
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(from)) return { sent: false, reason: 'The configured support sender address is invalid.' };
-  try {
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST', headers: { 'api-key': apiKey, 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ sender: { email: from, name: 'Vuprise Support' }, to: [{ email }], subject: 'Update to your Vuprise support request', textContent: message })
-    });
-    let body = {};
-    try { body = await response.json(); } catch { /* A provider error is classified below. */ }
-    if (!response.ok || typeof body.messageId !== 'string') {
-      console.warn('[Support reply] Brevo rejected a support reply.');
-      return { sent: false, reason: 'Brevo did not accept the email. The ticket update was saved, but no reply email was sent.' };
-    }
-    return { sent: true, reason: '' };
-  } catch {
-    console.warn('[Support reply] Brevo could not be reached.');
-    return { sent: false, reason: 'Brevo could not be reached. The ticket update was saved, but no reply email was sent.' };
-  }
-};
-
-const sendBulkEmail = async ({ apiKey, from, to, subject, text }) => {
-  try {
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST', headers: { 'api-key': apiKey, 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify({ sender: { email: from, name: 'Vuprise' }, to: [{ email: to }], subject, textContent: text })
-    });
-    let body = {};
-    try { body = await response.json(); } catch { /* A provider error is classified below. */ }
-    if (!response.ok || typeof body.messageId !== 'string') return { sent: false, reason: 'The email provider did not accept this address.' };
-    return { sent: true, reason: '' };
-  } catch {
-    return { sent: false, reason: 'The email provider could not be reached.' };
-  }
+  const { apiKey, senderEmail, senderName } = getBrevoConfig();
+  if (!apiKey) return { sent: false, reason: 'Email delivery is not set up yet. Add the Brevo keys in the server settings.' };
+  if (!EMAIL_ADDRESS_PATTERN.test(senderEmail)) return { sent: false, reason: 'The configured support sender address is invalid.' };
+  const result = await sendBrevoEmail({ apiKey, senderEmail, senderName, to: email, subject: 'Update to your Vuprise support request', text: message, html: textToHtml(message) });
+  return result.sent ? { sent: true, reason: '' } : { sent: false, reason: result.reason };
 };
 
 // Email Users: sends one provider request per recipient so addresses are never
@@ -446,23 +416,28 @@ const emailUsers = async (req, res, next) => {
     }
     if (!targets.length) return fail(res, 400, 'There are no eligible recipients with a deliverable email address.');
     if (targets.length > MAX_EMAIL_RECIPIENTS) return fail(res, 413, `This audience exceeds the current ${MAX_EMAIL_RECIPIENTS}-recipient email limit. Narrow the selection and try again.`);
-    const apiKey = process.env.BREVO_API_KEY;
-    if (!apiKey) return fail(res, 503, 'Brevo email delivery is not configured on the server.');
-    const from = process.env.PASSWORD_RESET_FROM || 'vupriseofficial@gmail.com';
-    if (!EMAIL_ADDRESS_PATTERN.test(from)) return fail(res, 503, 'The configured sender address is invalid.');
+    const { apiKey, senderEmail, senderName } = getBrevoConfig();
+    if (!apiKey) return fail(res, 503, 'Email delivery is not set up yet. Add the Brevo keys in the server settings.');
+    if (!EMAIL_ADDRESS_PATTERN.test(senderEmail)) return fail(res, 503, 'The configured sender address is invalid.');
 
     let sent = 0;
     const failures = [];
+    const html = textToHtml(text);
     const concurrency = sendSeparately ? 2 : 5;
     for (let offset = 0; offset < targets.length; offset += concurrency) {
       await Promise.all(targets.slice(offset, offset + concurrency).map(async ({ email }) => {
-        const result = await sendBulkEmail({ apiKey, from, to: email, subject, text });
+        const result = await sendBrevoEmail({ apiKey, senderEmail, senderName, to: email, subject, text, html });
         if (result.sent) sent += 1;
         else failures.push({ email, reason: result.reason });
       }));
     }
     const skipped = recipients.length - targets.length;
-    await logAction(req, null, 'email_users', '', null, null, `${sent} sent, ${failures.length} failed${verifiedOnly ? ', verified only' : ''}`);
+    // Audit logging must never turn a completed send into a reported failure.
+    try {
+      await logAction(req, null, 'email_users', '', null, null, `${sent} sent, ${failures.length} failed${verifiedOnly ? ', verified only' : ''}`);
+    } catch (error) {
+      console.error('[Admin email] Audit log write failed:', error?.message || 'unknown error');
+    }
     res.status(201).json({
       success: true,
       summary: { requested: targets.length, sent, failed: failures.length, skipped },

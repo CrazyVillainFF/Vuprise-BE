@@ -20,22 +20,35 @@ const createRequest = async (req, res, next) => {
     const { type, email, subject, message, category = '', userId = '', reportedUser = '', reportedPost = '', reportedComment = '', reportedMessage = '', reportedMessageScope = '', reportedThreadId = '', evidenceUrls = [], website = '' } = req.body || {};
     const evidenceFiles = req.files || [];
     if (website) { await removeTemporaryEvidence(evidenceFiles); return res.status(202).json({ success: true, message: 'Your request has been received.' }); }
+    // Field-specific validation so the form can show an actionable error
+    // instead of one generic message for every problem.
+    const reject = async (fieldMessage) => {
+      await removeTemporaryEvidence(evidenceFiles);
+      return res.status(400).json({ success: false, message: fieldMessage });
+    };
     const normalizedEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
     const validTypes = ['temporary_ban_appeal', 'permanent_ban_appeal', 'deleted_account_inquiry', 'general_help', 'report', 'other'];
-    if (!validTypes.includes(type) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) ||
-      typeof subject !== 'string' || subject.trim().length < 3 || subject.trim().length > 160 ||
-      typeof message !== 'string' || message.trim().length < 10 || message.trim().length > 5000 ||
-      typeof category !== 'string' || category.length > 80 ||
-      (userId && !/^[a-f\d]{24}$/i.test(userId)) || (reportedUser && !/^[a-f\d]{24}$/i.test(reportedUser)) ||
-      (reportedPost && !/^[a-f\d]{24}$/i.test(reportedPost)) || (reportedComment && !/^[a-f\d]{24}$/i.test(reportedComment)) ||
-      (reportedMessage && !/^[a-f\d]{24}$/i.test(reportedMessage)) ||
-      (reportedThreadId && !/^[a-f\d]{24}$/i.test(reportedThreadId)) ||
-      (reportedMessage && !['direct', 'group'].includes(reportedMessageScope)) ||
-      (reportedMessage && !reportedThreadId) || (!reportedMessage && (reportedMessageScope || reportedThreadId)) || !Array.isArray(evidenceUrls) || evidenceUrls.length + evidenceFiles.length > 5 ||
-      evidenceUrls.some((value) => typeof value !== 'string' || value.length > 2048 || !/^https:\/\//i.test(value))) {
-      await removeTemporaryEvidence(evidenceFiles);
-      return res.status(400).json({ success: false, message: 'Check the request type, email, subject, and message, then try again.' });
+    if (!validTypes.includes(type)) return reject('Request type: please select a valid option.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) return reject('Email: enter a valid email address.');
+    if (typeof subject !== 'string' || subject.trim().length < 3) return reject('Subject: enter at least 3 characters.');
+    if (subject.trim().length > 160) return reject('Subject: keep it under 160 characters.');
+    if (typeof message !== 'string' || message.trim().length < 10) return reject('Message: enter at least 10 characters.');
+    if (message.trim().length > 5000) return reject('Message: keep it under 5000 characters.');
+    if (typeof category !== 'string' || category.length > 80) return reject('Category: keep it under 80 characters.');
+    // The optional account user ID is a free-text hint (a name such as
+    // "Archana" is fine). It is never trusted as identity proof: the link to an
+    // account is only made when it is a real ObjectId that matches the
+    // submitted email (see below), or by exact email match.
+    if (typeof userId !== 'string' || userId.trim().length > 120) return reject('Account user ID: keep it under 120 characters.');
+    const idFields = [[reportedUser, 'Reported user'], [reportedPost, 'Reported post'], [reportedComment, 'Reported comment'], [reportedMessage, 'Reported message'], [reportedThreadId, 'Reported conversation']];
+    for (const [value, label] of idFields) {
+      if (value && (typeof value !== 'string' || !/^[a-f\d]{24}$/i.test(value))) return reject(`${label}: enter a valid ID.`);
     }
+    if (reportedMessage && !['direct', 'group'].includes(reportedMessageScope)) return reject('Reported message: choose direct or group scope.');
+    if (reportedMessage && !reportedThreadId) return reject('Reported message: include the conversation it belongs to.');
+    if (!reportedMessage && (reportedMessageScope || reportedThreadId)) return reject('Reported conversation: select a reported message first.');
+    if (!Array.isArray(evidenceUrls) || evidenceUrls.length + evidenceFiles.length > 5) return reject('Evidence: attach at most 5 files or links.');
+    if (evidenceUrls.some((value) => typeof value !== 'string' || value.length > 2048 || !/^https:\/\//i.test(value))) return reject('Evidence: links must be valid https URLs.');
 
     const ipKey = `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
     const emailKey = `email:${normalizedEmail}`;
