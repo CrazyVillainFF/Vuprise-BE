@@ -38,6 +38,20 @@ services:
         sync: false
       - key: CLOUDINARY_API_SECRET
         sync: false
+      # Vuprise AI chat: the API proxies an OpenCode server and answers 503
+      # until one is reachable. Set OPENCODE_BASE_URL to that server (and
+      # OPENCODE_SERVER_PASSWORD when it is protected with HTTP basic auth);
+      # see docs/production-feature-setup.md.
+      - key: OPENCODE_BASE_URL
+        sync: false
+      - key: OPENCODE_SERVER_PASSWORD
+        sync: false
+      - key: OPENCODE_MODEL_PROVIDER
+        value: opencode
+      - key: OPENCODE_MODEL_ID
+        value: deepseek-v4.1-flash-free
+      - key: AI_CHAT_TIMEOUT_MS
+        value: 90000
   - type: cron
     name: vuprise-inactivity-reminders
     env: node

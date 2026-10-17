@@ -22,7 +22,7 @@ const { cleanupAbandonedVideoUploads } = require('./controllers/videoUploadContr
 const adminRoutes = require('./routes/adminRoutes');
 const supportRoutes = require('./routes/supportRoutes');
 const aiRoutes = require('./routes/aiRoutes');
-const { isImageGenerationAvailable } = require('./services/aiChatService');
+const { isImageGenerationAvailable, describeAiProvider } = require('./services/aiChatService');
 
 const app = express();
 
@@ -291,6 +291,9 @@ const server = app.listen(PORT, () => {
   if (!isImageGenerationAvailable()) {
     console.warn('[ai] Image generation is disabled: set AI_IMAGE_API_URL and AI_IMAGE_API_KEY in server/.env to enable it (see .env.example).');
   }
+  const aiProvider = describeAiProvider();
+  if (aiProvider.level === 'warn') console.warn(aiProvider.message);
+  else console.log(aiProvider.message);
   console.log(`======================================================\n`);
 });
 

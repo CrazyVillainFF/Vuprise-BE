@@ -4,7 +4,7 @@ const AiConversation = require('../models/AiConversation');
 const aiImageStorage = require('../services/aiImageStorage');
 const aiImageQuota = require('../services/aiImageQuota');
 const { listConversations, createConversation, getConversation, sendConversationMessage, validateAttachmentUrls, sanitizeAssistantReply } = require('../controllers/aiController');
-const { resetStateForTests, SYSTEM_PROMPT, TEMP_WORKSPACE_DIR } = require('../services/aiChatService');
+const { resetStateForTests, describeAiProvider, SYSTEM_PROMPT, TEMP_WORKSPACE_DIR } = require('../services/aiChatService');
 const { installRateLimitCounter } = require('./helpers/rateLimitCounterDouble');
 
 // Mirrors the Express response object closely enough for the controller,
@@ -38,6 +38,19 @@ const withMockFetch = (handler) => {
 
 const withImageEnv = (env, fn) => {
   const keys = ['AI_IMAGE_API_URL', 'AI_IMAGE_API_KEY', 'AI_IMAGE_MODEL'];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  keys.forEach((key) => { delete process.env[key]; });
+  Object.entries(env).forEach(([key, value]) => { process.env[key] = value; });
+  return Promise.resolve().then(fn).finally(() => {
+    keys.forEach((key) => {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    });
+  });
+};
+
+const withAiEnv = (env, fn) => {
+  const keys = ['OPENCODE_BASE_URL', 'OPENCODE_SERVER_PASSWORD', 'OPENCODE_SERVER_USERNAME', 'OPENCODE_MODEL_PROVIDER', 'OPENCODE_MODEL_ID'];
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   keys.forEach((key) => { delete process.env[key]; });
   Object.entries(env).forEach(([key, value]) => { process.env[key] = value; });
@@ -581,4 +594,109 @@ test('a generation failure releases its quota reservation so a retry is not char
 
 test('the reply scrubber keeps the public identity free of model and provider names', () => {
   assert.equal(sanitizeAssistantReply('I am deepseek-v4.1-flash-free via OpenCode'), 'I am Vuprise AI via Vuprise AI');
+});
+
+test('an unreachable OpenCode server fails with the retryable 503 and logs a sanitized diagnostic', async () => {
+  resetStateForTests();
+  const limiter = installLimiter();
+  await withAiEnv({}, async () => {
+    const conversation = conversationDoc();
+    const originalFindOne = AiConversation.findOne;
+    AiConversation.findOne = () => ({ select: async () => conversation });
+    const restore = withMockFetch(async () => {
+      const error = new TypeError('fetch failed');
+      error.cause = { code: 'ECONNREFUSED' };
+      throw error;
+    });
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args.join(' '));
+    try {
+      const res = response();
+      await sendConversationMessage({ user: user('member-down'), params: { id: 'aic_1' }, body: { message: 'Hi there' }, get: () => 'localhost' }, res, (error) => { throw error; });
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.body.code, 'AI_UNAVAILABLE');
+      assert.equal(res.body.message, 'The AI service is currently unavailable. Please try again shortly.');
+      assert.equal(conversation.saved, false, 'a failed provider call persists nothing');
+      const log = warnings.join('\n');
+      assert.match(log, /\[ai-chat\] upstream request failed/);
+      assert.match(log, /target=http:\/\/127\.0\.0\.1:4096/);
+      assert.match(log, /cause=ECONNREFUSED/, 'the network cause reaches the server log');
+      assert.match(log, /OPENCODE_BASE_URL/, 'the log names the variable to check');
+      assert.equal(res.body.message.includes('ECONNREFUSED'), false, 'network internals never reach the client');
+    } finally {
+      console.warn = originalWarn;
+      AiConversation.findOne = originalFindOne;
+      restore();
+    }
+  });
+  limiter.restore();
+});
+
+test('HTTP basic credentials from the environment are attached to every upstream request and never echoed', async () => {
+  resetStateForTests();
+  const limiter = installLimiter();
+  await withAiEnv({ OPENCODE_BASE_URL: 'http://10.0.0.7:4096', OPENCODE_SERVER_PASSWORD: 'vuprise-secret', OPENCODE_SERVER_USERNAME: 'vuprise' }, async () => {
+    const calls = [];
+    const conversation = conversationDoc();
+    const originalFindOne = AiConversation.findOne;
+    AiConversation.findOne = () => ({ select: async () => conversation });
+    const restore = withMockFetch(async (url, options) => {
+      calls.push({ url, method: options?.method, headers: options?.headers || {} });
+      if (isSessionCreate(url)) return jsonResponse(200, { id: 'ses_1' });
+      if (options?.method === 'DELETE') return jsonResponse(200, {});
+      if (isClassifierCall(options)) return jsonResponse(200, classifierReply('chat'));
+      return jsonResponse(200, replyPayload('Hello from Vuprise AI'));
+    });
+    try {
+      const res = response();
+      await sendConversationMessage({ user: user('member-auth'), params: { id: 'aic_1' }, body: { message: 'Hi there' }, get: () => 'localhost' }, res, (error) => { throw error; });
+      assert.equal(res.statusCode, 201);
+      const expected = `Basic ${Buffer.from('vuprise:vuprise-secret').toString('base64')}`;
+      assert.ok(calls.length >= 3, 'session, classifier, and chat calls were made');
+      calls.forEach((call) => assert.equal(call.headers.Authorization, expected, `authorization missing for ${call.method} ${call.url}`));
+      assert.equal(JSON.stringify(res.body).includes('vuprise-secret'), false, 'the password never reaches the response');
+    } finally {
+      AiConversation.findOne = originalFindOne;
+      restore();
+    }
+  });
+  limiter.restore();
+});
+
+test('no Authorization header is sent when no server password is configured', async () => {
+  resetStateForTests();
+  await withAiEnv({}, async () => {
+    const calls = [];
+    const restore = withMockFetch(async (url, options) => {
+      calls.push({ url, headers: options?.headers || {} });
+      return jsonResponse(200, { healthy: true, version: '1.19.2' });
+    });
+    try {
+      const { isAvailable } = require('../services/aiChatService');
+      assert.equal(await isAvailable(), true);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].headers.Authorization, undefined);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test('the startup provider diagnostic names the configuration problem without leaking credentials', () => {
+  const productionDefault = describeAiProvider({ NODE_ENV: 'production' });
+  assert.equal(productionDefault.level, 'warn');
+  assert.match(productionDefault.message, /OPENCODE_BASE_URL is not configured/);
+  assert.match(productionDefault.message, /127\.0\.0\.1:4096/);
+
+  const invalid = describeAiProvider({ OPENCODE_BASE_URL: 'not a url' });
+  assert.equal(invalid.level, 'warn');
+  assert.match(invalid.message, /not a valid http\(s\) URL/);
+
+  const configured = describeAiProvider({ OPENCODE_BASE_URL: 'https://ai.internal.example:4096', OPENCODE_SERVER_PASSWORD: 'top-secret' });
+  assert.equal(configured.level, 'info');
+  assert.match(configured.message, /https:\/\/ai\.internal\.example:4096/);
+  assert.match(configured.message, /opencode\/deepseek-v4\.1-flash-free/);
+  assert.match(configured.message, /basic auth/);
+  assert.equal(configured.message.includes('top-secret'), false, 'the password never reaches the boot log');
 });

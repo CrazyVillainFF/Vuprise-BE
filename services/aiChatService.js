@@ -13,6 +13,7 @@ const DEFAULT_BASE_URL = 'http://127.0.0.1:4096';
 const DEFAULT_PROVIDER_ID = 'opencode';
 const DEFAULT_MODEL_ID = 'deepseek-v4.1-flash-free';
 const DEFAULT_TIMEOUT_MS = 90000;
+const DEFAULT_SERVER_USERNAME = 'opencode';
 
 // Sessions run in an empty temp directory outside the project so project
 // files, CLAUDE.md, or repo content can never enter the model context.
@@ -33,12 +34,15 @@ const ALL_TOOLS_DISABLED = Object.fromEntries(OPENCODE_TOOL_IDS.map((id) => [id,
 let toolsSupportedByProvider = true;
 
 class AiChatError extends Error {
-  constructor(message, statusCode = 502, code = 'AI_UPSTREAM_ERROR', upstreamStatus = null) {
+  constructor(message, statusCode = 502, code = 'AI_UPSTREAM_ERROR', upstreamStatus = null, upstreamCause = null) {
     super(message);
     this.name = 'AiChatError';
     this.statusCode = statusCode;
     this.code = code;
     this.upstreamStatus = upstreamStatus;
+    // Low-level network cause (e.g. ECONNREFUSED, ENOTFOUND, 'timeout') kept
+    // for server-side diagnostics only; never sent to the client.
+    this.upstreamCause = upstreamCause;
   }
 }
 
@@ -52,8 +56,48 @@ const config = () => {
     // configured model exposes variants low/high/max, so 'high' is a real,
     // accepted value (also settable via AI_CHAT_VARIANT).
     variant: process.env.AI_CHAT_VARIANT || 'high',
-    timeoutMs: Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : DEFAULT_TIMEOUT_MS
+    timeoutMs: Number.isFinite(parsedTimeout) && parsedTimeout > 0 ? parsedTimeout : DEFAULT_TIMEOUT_MS,
+    // Optional HTTP basic auth for a protected OpenCode server (the same names
+    // `opencode serve` documents for OPENCODE_SERVER_PASSWORD/OPENCODE_SERVER_USERNAME).
+    username: process.env.OPENCODE_SERVER_USERNAME || DEFAULT_SERVER_USERNAME,
+    password: process.env.OPENCODE_SERVER_PASSWORD || ''
   };
+};
+
+// The provider address can be logged safely: only the origin is ever used, so
+// userinfo, paths, and credentials can never leak through diagnostics.
+const safeOrigin = (url) => {
+  try { return new URL(url).origin; } catch { return 'invalid-url'; }
+};
+
+// Headers for every OpenCode server call. The basic-auth credential is read
+// from the server environment only; when no password is configured no
+// Authorization header is sent at all.
+const upstreamHeaders = (extra) => {
+  const { username, password } = config();
+  const headers = { ...(extra || {}) };
+  if (password) headers.Authorization = `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`;
+  return Object.keys(headers).length ? headers : undefined;
+};
+
+// Startup diagnostic: names the effective provider target and model exactly
+// once at boot (never credentials) and calls out the failure modes that are
+// silent today - an invalid URL, and the loopback default on a managed host,
+// where nothing runs inside the container and every AI request answers 503
+// until OPENCODE_BASE_URL is configured.
+const describeAiProvider = (env = process.env) => {
+  const configured = String(env.OPENCODE_BASE_URL || '').trim();
+  const baseUrl = (configured || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  const model = `${env.OPENCODE_MODEL_PROVIDER || DEFAULT_PROVIDER_ID}/${env.OPENCODE_MODEL_ID || DEFAULT_MODEL_ID}`;
+  let parsed = null;
+  try { parsed = new URL(baseUrl); } catch { parsed = null; }
+  if (!parsed || !/^https?:$/.test(parsed.protocol)) {
+    return { level: 'warn', message: '[ai-chat] OPENCODE_BASE_URL is not a valid http(s) URL; every AI chat request will fail. Set it to the reachable OpenCode server (see docs/production-feature-setup.md).' };
+  }
+  if (!configured && env.NODE_ENV === 'production') {
+    return { level: 'warn', message: `[ai-chat] OPENCODE_BASE_URL is not configured for this deployment (falling back to ${DEFAULT_BASE_URL}). Unless an OpenCode server runs inside this container, AI chat answers 503; set OPENCODE_BASE_URL in the Render environment (see docs/production-feature-setup.md).` };
+  }
+  return { level: 'info', message: `[ai-chat] provider target ${parsed.origin} (${model}${env.OPENCODE_SERVER_PASSWORD ? ', basic auth' : ''})` };
 };
 
 // Users with a request currently awaiting an upstream reply.
@@ -76,9 +120,10 @@ const fetchWithTimeout = async (url, options, timeoutMs, externalSignal) => {
       // provider that already accepted it may still finish the work on its
       // own side, and that late result is discarded here.
       if (externalSignal?.aborted) throw new AiChatError('The request was stopped.', 499, 'AI_CANCELLED');
-      throw new AiChatError('The AI service took too long to respond. Please try again.', 504, 'AI_TIMEOUT');
+      throw new AiChatError('The AI service took too long to respond. Please try again.', 504, 'AI_TIMEOUT', null, 'timeout');
     }
-    throw new AiChatError('The AI service is currently unavailable. Please try again shortly.', 503, 'AI_UNAVAILABLE');
+    const cause = error?.cause?.code || error?.cause?.name || error?.code || error?.name || 'unknown';
+    throw new AiChatError('The AI service is currently unavailable. Please try again shortly.', 503, 'AI_UNAVAILABLE', null, cause);
   } finally {
     clearTimeout(timer);
     if (externalSignal) externalSignal.removeEventListener('abort', forwardAbort);
@@ -87,11 +132,22 @@ const fetchWithTimeout = async (url, options, timeoutMs, externalSignal) => {
 
 const requestJson = async (method, path, body, timeoutMs, signal) => {
   const { baseUrl } = config();
-  const response = await fetchWithTimeout(`${baseUrl}${path}`, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined
-  }, timeoutMs, signal);
+  let response;
+  try {
+    response = await fetchWithTimeout(`${baseUrl}${path}`, {
+      method,
+      headers: upstreamHeaders(body ? { 'Content-Type': 'application/json' } : null),
+      body: body ? JSON.stringify(body) : undefined
+    }, timeoutMs, signal);
+  } catch (error) {
+    // A silent network failure here is what makes a missing/misconfigured
+    // provider look like an opaque 503 in production; one sanitized line (no
+    // credentials, payloads, or paths) makes it actionable in host logs.
+    if (error instanceof AiChatError && error.code !== 'AI_CANCELLED') {
+      console.warn(`[ai-chat] upstream request failed method=${method} target=${safeOrigin(baseUrl)} code=${error.code}${error.upstreamCause ? ` cause=${error.upstreamCause}` : ''}. Check that OPENCODE_BASE_URL points at a reachable OpenCode server (see docs/production-feature-setup.md).`);
+    }
+    throw error;
+  }
   if (!response.ok) {
     throw new AiChatError(
       'The AI service could not complete this request. Please try again.',
@@ -110,7 +166,7 @@ const requestJson = async (method, path, body, timeoutMs, signal) => {
 
 const isAvailable = async () => {
   try {
-    const response = await fetchWithTimeout(`${config().baseUrl}/global/health`, { method: 'GET' }, 4000);
+    const response = await fetchWithTimeout(`${config().baseUrl}/global/health`, { method: 'GET', headers: upstreamHeaders() }, 4000);
     return response.ok;
   } catch {
     return false;
@@ -411,4 +467,4 @@ const resetStateForTests = () => {
   toolsSupportedByProvider = true;
 };
 
-module.exports = { chat, oneShot, acquireUserLock, releaseUserLock, createSession, deleteSession, isAvailable, isImageGenerationAvailable, imageGenerationConfig, validateImageConfig, classifyImageProviderError, parseImageResponse, sniffImageMime, mimeForImageUrl, generateImage, config, AiChatError, resetStateForTests, SYSTEM_PROMPT, TEMP_WORKSPACE_DIR };
+module.exports = { chat, oneShot, acquireUserLock, releaseUserLock, createSession, deleteSession, isAvailable, isImageGenerationAvailable, imageGenerationConfig, validateImageConfig, classifyImageProviderError, parseImageResponse, sniffImageMime, mimeForImageUrl, generateImage, config, describeAiProvider, AiChatError, resetStateForTests, SYSTEM_PROMPT, TEMP_WORKSPACE_DIR };
